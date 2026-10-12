@@ -30,7 +30,7 @@ cd "$SRC"
 			wordpart average unaligned unaligned/packed_struct kref list_sort sort \
 			bsearch err stringify poison sizes hdmi kstrtox ctype limits const \
 			array_size args compiler_attributes typecheck kfifo string_choices \
-			cleanup kconfig circ_buf ascii85 scatterlist iosys-map nospec \
+			cleanup kconfig circ_buf types compiler_types compiler-gcc compiler compiler-context-analysis ascii85 scatterlist iosys-map nospec \
 			instruction_pointer jhash uuid; do
 		echo include/linux/$h.h
 	done
@@ -49,7 +49,7 @@ cd "$SRC"
 		include/uapi/asm-generic/types.h include/uapi/linux/posix_types.h \
 		include/uapi/asm-generic/posix_types.h include/linux/swab.h \
 		include/asm-generic/bitops/const_hweight.h include/linux/uuid.h \
-		include/uapi/linux/uuid.h 2>/dev/null || true
+		include/uapi/linux/uuid.h include/asm-generic/rwonce.h include/linux/pci_ids.h include/linux/acpi_amd_wbrf.h include/linux/seq_buf.h lib/seq_buf.c include/linux/gpu_buddy.h drivers/gpu/buddy.c include/uapi/linux/i2c.h include/linux/string_helpers.h include/linux/bvec.h include/trace/events/dma_fence.h include/uapi/linux/mei.h include/uapi/linux/mei_uuid.h include/linux/mod_devicetable.h include/uapi/linux/pci_regs.h include/vdso/align.h include/asm-generic/bitops/arch_hweight.h include/asm-generic/bitsperlong.h include/uapi/asm-generic/bitsperlong.h include/linux/err.h include/linux/kern_levels.h include/linux/once_lite.h include/asm-generic/bug.h include/linux/instrumented.h include/linux/bitmap.h include/linux/find.h include/linux/bitops.h include/asm-generic/bitops/generic-non-atomic.h include/asm-generic/bitops/instrumented-non-atomic.h include/linux/align.h include/linux/math64.h include/vdso/math64.h include/linux/time64.h include/vdso/time64.h include/uapi/linux/time.h include/uapi/linux/time_types.h include/vdso/time.h include/vdso/ktime.h include/vdso/jiffies.h include/linux/string.h include/linux/fortify-string.h include/linux/err.h include/linux/kstrtox.h include/linux/sprintf.h include/linux/hex.h include/linux/static_call_types.h include/linux/kern_levels.h include/asm-generic/bitops/fls64.h include/asm-generic/bitops/hweight.h include/asm-generic/bitops/le.h include/asm-generic/bitops/ext2-atomic.h include/asm-generic/bitops/sched.h 2>/dev/null || true
 	# library code the DRM and AMD sources call
 	ls lib/sort.c lib/list_sort.c lib/bsearch.c lib/rbtree.c lib/interval_tree.c \
 		lib/kstrtox.c lib/kstrtox.h lib/ctype.c lib/hexdump.c lib/math/gcd.c \
@@ -59,6 +59,9 @@ cd "$SRC"
 	echo COPYING
 	ls LICENSES/preferred/* LICENSES/exceptions/* 2>/dev/null || true
 } | sort -u > "$DST/.files"
-tar -cf - -T "$DST/.files" | tar -xf - -C "$DST"
+# Existing files are kept: Haiku changes to them are commits in this
+# repository. To move to a new Linux release, import into a clean tree and
+# rebase the Haiku commits.
+tar -cf - -T "$DST/.files" | tar -xf - --skip-old-files -C "$DST"
 make -s kernelversion > "$DST/VERSION" 2>/dev/null || sed -n 's/^VERSION = //p;s/^PATCHLEVEL = //p;s/^SUBLEVEL = //p' Makefile | paste -sd. > "$DST/VERSION"
 echo "imported $(wc -l < "$DST/.files") files from Linux $(cat "$DST/VERSION")"
