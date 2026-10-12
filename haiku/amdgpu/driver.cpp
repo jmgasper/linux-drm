@@ -88,6 +88,12 @@ struct drm_haiku_device_info {
 	uint32	class_code;
 	uint32	reserved[4];
 };
+#ifdef AMDGPU_DRM_ARMED_ONLY
+// lab builds: closes the driver's own /dev/dri/card0, so that devfs can unload
+// it (to test the teardown: then touch the binary)
+static const uint32 kDrmHaikuLabUnpin = LX_IOC(0, 'd', 0xff, 0);
+static void lab_unpin();
+#endif
 static const uint32 kDrmHaikuDeviceInfo = LX_IOC(2, 'd', 0xf2,
 	sizeof(drm_haiku_device_info));
 
@@ -427,6 +433,13 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 		return B_OK;
 	}
 
+#ifdef AMDGPU_DRM_ARMED_ONLY
+	if (op == kDrmHaikuLabUnpin) {
+		lab_unpin();
+		return B_OK;
+	}
+#endif
+
 	// everything of type 'd' is a DRM ioctl
 	if (((op >> 8) & 0xff) == 'd')
 		return haiku_status(lx_glue_ioctl(cookie->file, op, buffer));
@@ -605,6 +618,90 @@ armed_for_this_boot()
 #endif
 
 
+#ifndef AMDGPU_DRM_ARMED_ONLY
+/*	A start that brings the machine down must not repeat at every boot: there
+	may be nobody at the keyboard to pick another boot option (the lab X399
+	has none that works). A marker file exists from the start until the GPU
+	has run for half a minute; finding it means that the last start did not
+	get that far, and the driver stays off (the framebuffer driver drives the
+	display) until the marker is deleted. */
+static const char* kStartMarker
+	= "/boot/home/config/settings/kernel/drivers/amdgpu_drm.starting";
+static const bigtime_t kStableAfter = 30000000;
+static sem_id sStableSem = -1;
+static thread_id sStableThread = -1;
+
+
+static bool
+previous_start_failed()
+{
+	struct stat st;
+	return stat(kStartMarker, &st) == 0;
+}
+
+
+static void
+mark_start()
+{
+	int fd = _kern_open(-1, kStartMarker, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		// a read-only boot volume: no protection, but no harm either
+		TRACE("cannot create %s: %s\n", kStartMarker, strerror(fd));
+		return;
+	}
+	static const char kText[] = "amdgpu_drm was starting; delete this file "
+		"to let it start again\n";
+	_kern_write(fd, 0, kText, sizeof(kText) - 1);
+	_kern_fsync(fd, false);
+	_kern_close(fd);
+	_kern_sync();
+}
+
+
+static status_t
+stable_thread(void*)
+{
+	// released early when the driver is unloaded
+	if (acquire_sem_etc(sStableSem, 1, B_RELATIVE_TIMEOUT, kStableAfter)
+			== B_TIMED_OUT) {
+		_kern_unlink(-1, kStartMarker);
+		_kern_sync();
+		TRACE("running stably\n");
+	}
+	return B_OK;
+}
+
+
+static void
+start_stable_timer()
+{
+	sStableSem = create_sem(0, "amdgpu_drm stable");
+	if (sStableSem < 0)
+		return;
+	sStableThread = spawn_kernel_thread(stable_thread, "amdgpu_drm stable",
+		B_LOW_PRIORITY, NULL);
+	if (sStableThread >= 0)
+		resume_thread(sStableThread);
+}
+
+
+static void
+stop_stable_timer()
+{
+	if (sStableSem < 0)
+		return;
+	release_sem(sStableSem);
+	if (sStableThread >= 0) {
+		status_t result;
+		wait_for_thread(sStableThread, &result);
+		sStableThread = -1;
+	}
+	delete_sem(sStableSem);
+	sStableSem = -1;
+}
+#endif
+
+
 #ifdef AMDGPU_DRM_ARMED_ONLY
 /*	devfs reloads a driver none of whose devices is open whenever a file
 	system event marks its binary as changed, and the lab's installation and
@@ -621,6 +718,32 @@ pin_thread(void*)
 	else
 		sPinFile = fd;
 	return B_OK;
+}
+
+
+static status_t
+unpin_thread(void*)
+{
+	// a kernel thread: the descriptor is the kernel team's
+	if (sPinFile >= 0) {
+		_kern_close(sPinFile);
+		sPinFile = -1;
+		LAB_LOG("unpinned\n");
+	}
+	return B_OK;
+}
+
+
+static void
+lab_unpin()
+{
+	thread_id thread = spawn_kernel_thread(unpin_thread, "amdgpu_drm unpin",
+		B_NORMAL_PRIORITY, NULL);
+	if (thread >= 0) {
+		resume_thread(thread);
+		status_t result;
+		wait_for_thread(thread, &result);
+	}
 }
 #endif
 
@@ -656,6 +779,12 @@ init_driver(void)
 		TRACE("not armed (%s), not starting\n", kArmFile);
 		return B_ERROR;
 	}
+#else
+	if (previous_start_failed()) {
+		dprintf(DRIVER_NAME ": the last start did not finish (%s exists); not "
+			"starting\n", kStartMarker);
+		return B_ERROR;
+	}
 #endif
 
 	pci_module_info* pci;
@@ -689,10 +818,19 @@ init_driver(void)
 			gpus++;
 	}
 
+#ifndef AMDGPU_DRM_ARMED_ONLY
+	bool marked = false;
+#endif
 	for (int32 i = 0; sSelfTest == 0
 			&& pci->get_nth_pci_info(i, &info) == B_OK; i++) {
 		if (!is_amd_gpu(info))
 			continue;
+#ifndef AMDGPU_DRM_ARMED_ONLY
+		if (!marked) {
+			mark_start();
+			marked = true;
+		}
+#endif
 		if (lx_glue_probe(info.bus, info.device, info.function) == 0)
 			gpus++;
 	}
@@ -703,6 +841,13 @@ init_driver(void)
 		TRACE("no GPU started\n");
 		lx_glue_uninit();
 		sStarted = false;
+#ifndef AMDGPU_DRM_ARMED_ONLY
+		if (marked) {
+			// it failed, but it did not bring the machine down
+			_kern_unlink(-1, kStartMarker);
+			_kern_sync();
+		}
+#endif
 		return B_ENTRY_NOT_FOUND;
 	}
 
@@ -726,6 +871,8 @@ init_driver(void)
 		B_NORMAL_PRIORITY, NULL);
 	if (pin >= 0)
 		resume_thread(pin);
+#else
+	start_stable_timer();
 #endif
 	return B_OK;
 }
@@ -739,6 +886,8 @@ uninit_driver(void)
 		_kern_close(sPinFile);
 		sPinFile = -1;
 	}
+#else
+	stop_stable_timer();
 #endif
 	for (int i = 0; i < sDeviceCount; i++)
 		free(sDeviceNames[i]);

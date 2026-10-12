@@ -11,7 +11,8 @@
 # before touching the GPU, so a start that brings the machine down is not
 # repeated at the next boot.
 # A loaded driver's binary must not be replaced: devfs reloads it underneath
-# itself. This refuses when the add-on is loaded.
+# itself. This refuses when the add-on is loaded, unless HOT=1: then the lab
+# build is asked to close its own card0 and devfs unloads it.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 FIRMWARE=${1:-/mnt/HaikuWork/x399/build/amdgpu-drm-stage/firmware}
@@ -24,8 +25,14 @@ DRV=$NP/add-ons/kernel/drivers
 # no start from the file system events of this installation
 $SSH "rm -f /boot/home/config/settings/kernel/drivers/amdgpu_drm.arm; sync"
 if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
-	echo "amdgpu_drm is loaded on the workstation; power cycle it first" >&2
-	exit 1
+	if [ "${HOT:-}" != 1 ]; then
+		echo "amdgpu_drm is loaded on the workstation; power cycle it first," \
+			"or HOT=1 to unload it (tests the teardown)" >&2
+		exit 1
+	fi
+	# lab builds keep card0 open; with nothing else open, replacing the
+	# binary makes devfs unload the running driver
+	$SSH "/boot/home/amdgpu-drm/lab_unpin"
 fi
 
 tar -C "$FIRMWARE" -cf - . | $SSH "mkdir -p $NP/data/firmware && tar -xmf - -C $NP/data/firmware"
@@ -34,7 +41,8 @@ $SSH "rm -rf $DRV/dev/amdgpu_test && mkdir -p $DRV/dev/dri && ln -sf ../../bin/a
 # the test programs, built on the workstation
 tar -C "$ROOT" -cf - haiku/tests linux/include/uapi/drm haiku/compat/include/drm/drm_haiku.h \
 	| $SSH "mkdir -p /boot/home/amdgpu-drm && cd /boot/home/amdgpu-drm && tar -xmf - \
-		&& gcc -O2 -Ilinux/include/uapi -Ihaiku/compat/include -o amdgpu_smoke haiku/tests/amdgpu_smoke.c"
+		&& gcc -O2 -Ilinux/include/uapi -Ihaiku/compat/include -o amdgpu_smoke haiku/tests/amdgpu_smoke.c \
+		&& gcc -O2 -o lab_unpin haiku/tests/lab_unpin.c"
 local=$(sha256sum "$BIN" | cut -d' ' -f1)
 remote=$($SSH "sha256sum $DRV/bin/amdgpu_drm" | cut -d' ' -f1)
 [ "$local" = "$remote" ] || { echo "checksum mismatch" >&2; exit 1; }
