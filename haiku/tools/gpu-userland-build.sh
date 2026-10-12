@@ -93,6 +93,10 @@ stage_mesa_configure() {
 stage_mesa() {
 	ninja -C "$BUILD/mesa" -j"$JOBS" ${NINJA_KEEP_GOING:+-k 0}
 	ninja -C "$BUILD/mesa" install
+	# libglvnd looks for EGL vendors in add-ons/opengl/egl_vendor.d on Haiku
+	mkdir -p "$PREFIX/add-ons/opengl/egl_vendor.d"
+	cp -f "$PREFIX/data/glvnd/egl_vendor.d/50_mesa.json" \
+		"$PREFIX/add-ons/opengl/egl_vendor.d/"
 }
 
 for stage in "$@"; do
