@@ -32,7 +32,7 @@ echo "armed with: ${*:-(no parameters)}"
 for i in $(seq 1 60); do
 	sleep 2
 	if $SSH "test -e /dev/dri/card0" 2>/dev/null; then
-		# lab builds keep /dev/dri/card0 open themselves (see driver.cpp)
+		# lab builds keep a device open themselves (see driver.cpp)
 		echo "started"
 		exit 0
 	fi

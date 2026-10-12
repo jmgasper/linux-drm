@@ -12,7 +12,7 @@
 # repeated at the next boot.
 # A loaded driver's binary must not be replaced: devfs reloads it underneath
 # itself. This refuses when the add-on is loaded, unless HOT=1: then the lab
-# build is asked to close its own card0 and devfs unloads it.
+# build is asked to close its own device file and devfs unloads it.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 FIRMWARE=${1:-/mnt/HaikuWork/x399/build/amdgpu-drm-stage/firmware}
@@ -30,7 +30,7 @@ if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
 			"or HOT=1 to unload it (tests the teardown)" >&2
 		exit 1
 	fi
-	# lab builds keep card0 open; with nothing else open, replacing the
+	# lab builds keep a device open; with nothing else open, replacing the
 	# binary makes devfs unload the running driver
 	$SSH "/boot/home/amdgpu-drm/lab_unpin"
 fi
