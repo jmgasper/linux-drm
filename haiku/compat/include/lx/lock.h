@@ -23,7 +23,7 @@ struct task_struct;
 struct lx_lock {
 	int state;			/* 0 not initialized, 1 initializing, 2 ready */
 	int depth;			/* lockdep subclass, unused */
-	struct task_struct *owner;
+	long owner;			/* Haiku thread holding it, 0 if none */
 	const char *name;
 	u64 haiku[6];		/* Haiku's mutex */
 };
@@ -71,7 +71,7 @@ typedef struct raw_spinlock {
 #define spin_unlock_irq(lock)		lx_lock_unlock(&(lock)->l)
 #define spin_unlock_irqrestore(lock, flags) \
 	do { (void)(flags); lx_lock_unlock(&(lock)->l); } while (0)
-#define spin_is_locked(lock)		(READ_ONCE((lock)->l.owner) != NULL)
+#define spin_is_locked(lock)		(READ_ONCE((lock)->l.owner) != 0)
 #define assert_spin_locked(lock)	do { } while (0)
 #define raw_spin_lock				spin_lock
 #define raw_spin_lock_irq			spin_lock_irq
@@ -153,7 +153,7 @@ struct mutex {
 #define mutex_lock_killable_nested(mutex, sub) mutex_lock_killable(mutex)
 #define mutex_trylock(mutex)		lx_lock_trylock(&(mutex)->l)
 #define mutex_unlock(mutex)			lx_lock_unlock(&(mutex)->l)
-#define mutex_is_locked(mutex)		(READ_ONCE((mutex)->l.owner) != NULL)
+#define mutex_is_locked(m)			(READ_ONCE((m)->l.owner) != 0)
 #define devm_mutex_init(dev, mutex)	({ mutex_init(mutex); 0; })
 int atomic_dec_and_mutex_lock(atomic_t *cnt, struct mutex *lock);
 
@@ -183,7 +183,7 @@ DEFINE_LOCK_GUARD_0(migrate, migrate_disable(), migrate_enable())
 struct rw_semaphore {
 	int state;
 	int pad;
-	struct task_struct *writer;
+	long writer;
 	const char *name;
 	u64 haiku[10];		/* Haiku's rw_lock */
 };

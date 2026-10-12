@@ -36,6 +36,7 @@
 #include <linux/once_lite.h>
 #include <linux/instruction_pointer.h>
 #include <linux/stdarg.h>
+#include <linux/ctype.h>
 
 
 /* #pragma mark - errors */

@@ -55,10 +55,12 @@ AMD_INCLUDES := $(addprefix -I$(LINUX)/,$(shell cat $(BUILDDIR)/includes-amdgpu.
 
 # Haiku-side C++ (compat implementation and the driver): Haiku's headers.
 HAIKU_INCLUDES := -I$(COMPAT)/haiku -I$(DRIVER) \
+	-I$(HAIKU_TOP)/build/config_headers -I$(HAIKU_TOP)/build/user_config_headers \
 	-I$(HAIKU_TOP)/headers/private -I$(HAIKU_TOP)/headers/private/shared \
 	-I$(HAIKU_TOP)/headers/private/kernel \
 	-I$(HAIKU_TOP)/headers/private/kernel/arch/x86 \
 	-I$(HAIKU_TOP)/headers/private/kernel/arch/x86/64 \
+	-I$(HAIKU_TOP)/headers/private/kernel/boot/platform/efi \
 	-I$(HAIKU_TOP)/headers/private/system \
 	-I$(HAIKU_TOP)/headers/private/system/arch/x86_64 \
 	-I$(HAIKU_TOP)/headers/private/drivers \
@@ -76,8 +78,9 @@ HAIKU_INCLUDES := -I$(COMPAT)/haiku -I$(DRIVER) \
 	-I$(HAIKU_TOP)/headers/os/device -I$(HAIKU_TOP)/headers/os/storage \
 	-I$(HAIKU_TOP)/headers/os/app -I$(HAIKU_TOP)/headers/os/interface \
 	-I$(HAIKU_TOP)/headers/os/add-ons/graphics
-HXXFLAGS := -std=gnu++20 -nostdinc $(KFLAGS) -fno-exceptions -fno-rtti \
-	-fno-use-cxa-atexit -D_KERNEL_MODE -D_DEFAULT_SOURCE -Wall -Wno-multichar \
+HXXFLAGS := -std=gnu++20 -nostdinc $(KFLAGS) -fno-exceptions \
+	-fno-use-cxa-atexit -D_KERNEL_MODE -D_DEFAULT_SOURCE -DARCH_x86_64 \
+	-DHAIKU_TARGET_PLATFORM_HAIKU -Wall -Wno-multichar \
 	-Wno-missing-field-initializers $(HAIKU_INCLUDES)
 HCFLAGS := -std=gnu11 -nostdinc $(KFLAGS) -D_KERNEL_MODE -D_DEFAULT_SOURCE \
 	-Wall $(HAIKU_INCLUDES)
@@ -88,7 +91,7 @@ CORE_SRCS := $(shell cat $(BUILDDIR)/sources-core.txt) \
 	lib/sort.c lib/list_sort.c lib/bsearch.c lib/rbtree.c lib/interval_tree.c \
 	lib/kstrtox.c lib/ctype.c lib/hexdump.c lib/math/gcd.c lib/scatterlist.c \
 	lib/kfifo.c lib/llist.c lib/refcount.c lib/string_helpers.c lib/uuid.c \
-	lib/math/div64.c lib/seq_buf.c drivers/gpu/buddy.c drivers/video/hdmi.c
+	lib/math/div64.c lib/seq_buf.c lib/bitmap.c lib/find_bit.c drivers/gpu/buddy.c drivers/video/hdmi.c drivers/i2c/algos/i2c-algo-bit.c
 AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu.txt)
 AMD_FP_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu-fp.txt)
 LX_COMPAT_SRCS := $(wildcard $(COMPAT)/src/*.c)

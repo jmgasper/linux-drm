@@ -1,8 +1,8 @@
 drivers/dma-buf/dma-buf.c
 drivers/dma-buf/dma-fence-array.c
+drivers/dma-buf/dma-fence.c
 drivers/dma-buf/dma-fence-chain.c
 drivers/dma-buf/dma-fence-unwrap.c
-drivers/dma-buf/dma-fence.c
 drivers/dma-buf/dma-resv.c
 drivers/dma-buf/sync_file.c
 drivers/gpu/drm/display/drm_display_helper_mod.c
@@ -40,8 +40,8 @@ drivers/gpu/drm/drm_flip_work.c
 drivers/gpu/drm/drm_format_helper.c
 drivers/gpu/drm/drm_fourcc.c
 drivers/gpu/drm/drm_framebuffer.c
-drivers/gpu/drm/drm_gem.c
 drivers/gpu/drm/drm_gem_atomic_helper.c
+drivers/gpu/drm/drm_gem.c
 drivers/gpu/drm/drm_gem_framebuffer_helper.c
 drivers/gpu/drm/drm_gem_ttm_helper.c
 drivers/gpu/drm/drm_ioctl.c
@@ -54,6 +54,7 @@ drivers/gpu/drm/drm_mode_object.c
 drivers/gpu/drm/drm_modes.c
 drivers/gpu/drm/drm_modeset_helper.c
 drivers/gpu/drm/drm_modeset_lock.c
+drivers/gpu/drm/drm_pci.c
 drivers/gpu/drm/drm_plane.c
 drivers/gpu/drm/drm_plane_helper.c
 drivers/gpu/drm/drm_prime.c

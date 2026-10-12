@@ -467,7 +467,11 @@ static inline void i2c_set_adapdata(struct i2c_adapter *adap, void *data)
 }
 int i2c_add_adapter(struct i2c_adapter *adap);
 void i2c_del_adapter(struct i2c_adapter *adap);
-#define i2c_add_numbered_adapter(adap)	i2c_add_adapter(adap)
+int i2c_add_numbered_adapter(struct i2c_adapter *adap);
+static inline u8 i2c_8bit_addr_from_msg(const struct i2c_msg *msg)
+{
+	return (msg->addr << 1) | (msg->flags & I2C_M_RD);
+}
 int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num);
 int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num);
 #define I2C_LOCK_ROOT_ADAPTER	BIT(0)
@@ -495,7 +499,7 @@ struct i2c_algo_bit_data {
 	bool can_do_atomic;
 };
 int i2c_bit_add_bus(struct i2c_adapter *adap);
-#define i2c_bit_add_numbered_bus(adap)	i2c_bit_add_bus(adap)
+int i2c_bit_add_numbered_bus(struct i2c_adapter *adap);
 extern const struct i2c_algorithm i2c_bit_algo;
 
 /* #pragma mark - tracepoints: compiled out */

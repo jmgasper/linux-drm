@@ -287,7 +287,8 @@ struct pci_dev *pci_get_device(unsigned int vendor, unsigned int device,
 	struct pci_dev *from);
 #define pci_get_slot(bus, devfn) \
 	pci_get_domain_bus_and_slot((bus)->domain_nr, (bus)->number, devfn)
-#define pci_register_driver(drv)	0
+int lx_pci_register_driver(struct pci_driver *driver);
+#define pci_register_driver(drv)	lx_pci_register_driver(drv)
 #define pci_unregister_driver(drv)	do { } while (0)
 int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
 	unsigned int max_vecs, unsigned int flags);
