@@ -144,6 +144,10 @@ amdgpu_drm $driverVersion (linux-drm $commit): Linux $linuxVersion's amdgpu
 driver with the DRM core, TTM, the GPU scheduler and Display Core, running
 on Haiku through a Linux compatibility layer. Built against $haikuVersion.
 
+Licence: GNU GPL v2 (the add-on combines GPL-2.0 and MIT sources). Its
+complete source is https://github.com/jmgasper/linux-drm at commit $commit
+(COPYING there says which files are under which licence).
+
 It publishes /dev/dri/card<n> and renderD<n> (the DRM interface libdrm,
 Mesa's radeonsi and RADV, and libva use) and /dev/graphics/amdgpu_drm_<n>
 for app_server, which drives it through the amdgpu_kms accelerant.
@@ -169,6 +173,7 @@ vendor			"air/OS"
 copyrights		{ "Advanced Micro Devices, Inc." "The Linux kernel contributors" "air/OS" }
 licenses		{ "MIT" "GNU GPL v2" }
 provides		{ amdgpu_drm = $linuxVersion }
+source-urls		{ "https://github.com/jmgasper/linux-drm" }
 requires		{
 	haiku >= $haikuVersion
 	amdgpu_firmwares
