@@ -360,6 +360,10 @@ main(int argc, char** argv)
 	xdg_toplevel_destroy(toplevel);
 	xdg_surface_destroy(xdgSurface);
 	wl_surface_destroy(surface);
+	/* let the in-process server close the window before the program (and
+	   with it the server's add-on) goes away: its window thread has been
+	   seen running on into unloaded code otherwise */
+	wl_display_roundtrip(display);
 	wl_display_disconnect(display);
 	printf("VKWAYLAND PASS\n");
 	return 0;
