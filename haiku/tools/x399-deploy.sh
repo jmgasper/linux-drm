@@ -36,7 +36,8 @@ if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
 fi
 
 tar -C "$FIRMWARE" -cf - . | $SSH "mkdir -p $NP/data/firmware && tar -xmf - -C $NP/data/firmware"
-$SSH "cat > $DRV/bin/amdgpu_drm.tmp && chmod 755 $DRV/bin/amdgpu_drm.tmp && mv -f $DRV/bin/amdgpu_drm.tmp $DRV/bin/amdgpu_drm" < "$BIN"
+# staged outside the drivers' directories: devfs starts any new file in them
+$SSH "mkdir -p /boot/home/amdgpu-drm && cat > /boot/home/amdgpu-drm/amdgpu_drm.new && chmod 755 /boot/home/amdgpu-drm/amdgpu_drm.new && mv -f /boot/home/amdgpu-drm/amdgpu_drm.new $DRV/bin/amdgpu_drm" < "$BIN"
 $SSH "rm -rf $DRV/dev/amdgpu_test && mkdir -p $DRV/dev/dri && ln -sf ../../bin/amdgpu_drm $DRV/dev/dri/amdgpu_drm && sync"
 # the test programs, built on the workstation
 tar -C "$ROOT" -cf - haiku/tests linux/include/uapi/drm haiku/compat/include/drm/drm_haiku.h \

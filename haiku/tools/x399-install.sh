@@ -37,10 +37,14 @@ if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
 	echo "amdgpu_drm is loaded; installing for the next boot" >&2
 fi
 
-$SSH "mkdir -p $DRV/bin $DRV/dev/dri $DRV/dev/graphics \
-	&& cat > $DRV/bin/amdgpu_drm.new && chmod 755 $DRV/bin/amdgpu_drm.new" < "$BIN"
+# Uploaded outside the drivers' directories: devfs takes any new file in
+# them for a driver and starts it, and a second amdgpu on the same GPU
+# brings the machine down.
+STAGE=/boot/home/amdgpu-drm/amdgpu_drm.new
+$SSH "mkdir -p $DRV/bin $DRV/dev/dri $DRV/dev/graphics /boot/home/amdgpu-drm \
+	&& cat > $STAGE && chmod 755 $STAGE" < "$BIN"
 $SSH "set -e
-	mv -f $DRV/bin/amdgpu_drm.new $DRV/bin/amdgpu_drm
+	mv -f $STAGE $DRV/bin/amdgpu_drm
 	ln -sf ../../bin/amdgpu_drm $DRV/dev/dri/amdgpu_drm
 	ln -sf ../../bin/amdgpu_drm $DRV/dev/graphics/amdgpu_drm
 	mkdir -p $NP/add-ons/accelerants
