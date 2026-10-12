@@ -1,0 +1,1 @@
+/* bitmap string parsing is not used */

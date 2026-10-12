@@ -1,0 +1,2 @@
+/* Linux <linux/hwmon.h>: provided by the compat layer. */
+#include <lx/all.h>

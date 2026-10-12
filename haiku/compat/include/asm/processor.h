@@ -1,0 +1,2 @@
+/* Linux <asm/processor.h>: provided by the compat layer. */
+#include <lx/all.h>
