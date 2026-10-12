@@ -136,7 +136,7 @@ void smu7_powergate_uvd(struct pp_hwmgr *hwmgr, bool bgate)
 						AMD_PG_STATE_UNGATE);
 		smu7_update_uvd_dpm(hwmgr, false);
 	}
-
+	smu7_update_video_mclk(hwmgr);
 }
 
 void smu7_powergate_vce(struct pp_hwmgr *hwmgr, bool bgate)
@@ -164,6 +164,7 @@ void smu7_powergate_vce(struct pp_hwmgr *hwmgr, bool bgate)
 						AMD_PG_STATE_UNGATE);
 		smu7_update_vce_dpm(hwmgr, false);
 	}
+	smu7_update_video_mclk(hwmgr);
 }
 
 int smu7_update_clock_gatings(struct pp_hwmgr *hwmgr,

@@ -428,7 +428,10 @@ static void pp_dpm_powergate_vce(void *handle, bool gate)
 {
 	struct pp_hwmgr *hwmgr = handle;
 
-	if (!hwmgr || !hwmgr->pm_en)
+	if (!hwmgr)
+		return;
+	hwmgr->vce_powered = !gate;
+	if (!hwmgr->pm_en)
 		return;
 
 	if (hwmgr->hwmgr_func->powergate_vce == NULL) {
@@ -442,7 +445,10 @@ static void pp_dpm_powergate_uvd(void *handle, bool gate)
 {
 	struct pp_hwmgr *hwmgr = handle;
 
-	if (!hwmgr || !hwmgr->pm_en)
+	if (!hwmgr)
+		return;
+	hwmgr->uvd_powered = !gate;
+	if (!hwmgr->pm_en)
 		return;
 
 	if (hwmgr->hwmgr_func->powergate_uvd == NULL) {

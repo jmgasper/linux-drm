@@ -3209,6 +3209,35 @@ static void smu7_apply_minimum_dce_voltage_request(struct pp_hwmgr *hwmgr)
 			NULL);
 }
 
+/* air/OS: the memory clock levels the SMC may use: the ones the power
+ * state allows, but only the highest while UVD or VCE is powered. They
+ * stream pictures through video memory, and their output comes out corrupt
+ * when other GPU work starves them at a low memory clock (Radeon Pro WX
+ * 5100: damaged H.264 references during Vulkan copies; every picture with
+ * the memory clock held at 300 MHz).
+ */
+static uint32_t smu7_mclk_enable_mask(struct pp_hwmgr *hwmgr)
+{
+	struct smu7_hwmgr *data = (struct smu7_hwmgr *)(hwmgr->backend);
+	uint32_t mask = data->dpm_level_enable_mask.mclk_dpm_enable_mask;
+
+	if (mask != 0 && (hwmgr->uvd_powered || hwmgr->vce_powered))
+		mask = 1u << (fls(mask) - 1);
+	return mask;
+}
+
+/* air/OS: called when UVD or VCE is powered up or down */
+int smu7_update_video_mclk(struct pp_hwmgr *hwmgr)
+{
+	struct smu7_hwmgr *data = (struct smu7_hwmgr *)(hwmgr->backend);
+	uint32_t mask = smu7_mclk_enable_mask(hwmgr);
+
+	if (data->mclk_dpm_key_disabled || mask == 0)
+		return 0;
+	return smum_send_msg_to_smc_with_parameter(hwmgr,
+			PPSMC_MSG_MCLKDPM_SetEnabledMask, mask, NULL);
+}
+
 static int smu7_upload_dpm_level_enable_mask(struct pp_hwmgr *hwmgr)
 {
 	struct smu7_hwmgr *data = (struct smu7_hwmgr *)(hwmgr->backend);
@@ -3227,7 +3256,7 @@ static int smu7_upload_dpm_level_enable_mask(struct pp_hwmgr *hwmgr)
 		if (data->dpm_level_enable_mask.mclk_dpm_enable_mask)
 			smum_send_msg_to_smc_with_parameter(hwmgr,
 					PPSMC_MSG_MCLKDPM_SetEnabledMask,
-					data->dpm_level_enable_mask.mclk_dpm_enable_mask,
+					smu7_mclk_enable_mask(hwmgr),
 					NULL);
 	}
 

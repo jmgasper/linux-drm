@@ -743,6 +743,10 @@ enum PP_TABLE_VERSION {
 struct pp_hwmgr {
 	void *adev;
 	uint32_t chip_family;
+	/* air/OS: whether amdgpu has UVD and VCE powered (smu7 keeps the
+	 * memory clock up then), as last asked, also before pm_en */
+	bool uvd_powered;
+	bool vce_powered;
 	uint32_t chip_id;
 	uint32_t smu_version;
 	bool not_vf;
