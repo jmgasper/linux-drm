@@ -4,7 +4,7 @@
 # into $ROOT/prefix.
 #
 #   gpu-userland-build.sh STAGE...    stages: libdrm libva glvnd mesa-configure
-#                                     mesa ffmpeg
+#                                     mesa ffmpeg bundle
 #
 # Environment: GPU_ROOT (default /boot/home/gpu-userland), GPU_JOBS (16),
 # MESA_VULKAN_DRIVERS (default none; "amd" for RADV), MESA_GALLIUM_VA
@@ -130,6 +130,32 @@ stage_ffmpeg() {
 		--enable-parser=h264,hevc --enable-hwaccel=h264_vaapi,hevc_vaapi \
 		--enable-vaapi \
 		&& make -j"$JOBS" && make install)
+}
+
+# The system install as one archive, for another machine: extract it with
+# "tar -xzf <archive> -C /" (Haiku's tar), then reboot. Built from the
+# /boot/system/non-packaged build trees (GPU_PREFIX), with the add-on manifests
+# and the amduvd (VA-API) media add-on.
+stage_bundle() {
+	local stage=$ROOT/tmp/bundle
+	rm -rf "$stage"
+	for tree in libdrm libva glvnd mesa; do
+		DESTDIR=$stage ninja -C "$BUILD/$tree" install > /dev/null
+	done
+	local np=$stage$PREFIX
+	mkdir -p "$np/add-ons/opengl/egl_vendor.d" "$np/add-ons/vulkan/icd.d" \
+		"$np/add-ons/media/plugins"
+	cp -f "$np/data/glvnd/egl_vendor.d/50_mesa.json" \
+		"$np/add-ons/opengl/egl_vendor.d/"
+	[ -f "$np/data/vulkan/icd.d/radeon_icd.x86_64.json" ] \
+		&& cp -f "$np/data/vulkan/icd.d/radeon_icd.x86_64.json" \
+			"$np/add-ons/vulkan/icd.d/"
+	local plugin=/boot/home/config/non-packaged/add-ons/media/plugins/amduvd
+	[ -f "$plugin" ] && cp -f "$plugin" "$np/add-ons/media/plugins/amduvd"
+	local archive=$ROOT/amdgpu-userland-$(date +%Y%m%d).tar.gz
+	(cd "$stage" && tar -czf "$archive" boot)
+	rm -rf "$stage"
+	echo "$archive: $(du -h "$archive" | cut -f1)"
 }
 
 for stage in "$@"; do
