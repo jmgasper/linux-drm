@@ -36,6 +36,13 @@ export TMPDIR=$ROOT/tmp
 TLS=-mtls-dialect=gnu
 POSITIVE=-DB_USE_POSITIVE_POSIX_ERRORS
 MAPPER=-lposix_error_mapper
+LINK=
+if [ "$PREFIX" != "$ROOT/prefix" ]; then
+	# Installed for the system: the libraries find each other there whatever
+	# LIBRARY_PATH a program sets (Summit's leaves non-packaged out).
+	LINK="-Wl,-rpath,$PREFIX/lib"
+	MAPPER="$MAPPER $LINK"
+fi
 
 stage_libdrm() {
 	if [ ! -f "$BUILD/libdrm/build.ninja" ]; then
@@ -46,7 +53,7 @@ stage_libdrm() {
 			-Domap=disabled -Dexynos=disabled -Dfreedreno=disabled \
 			-Dtegra=disabled -Dvc4=disabled -Detnaviv=disabled \
 			-Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled \
-			-Dinstall-test-programs=false -Dtests=false
+			-Dinstall-test-programs=false -Dtests=false ${LINK:+"-Dc_link_args=$LINK"}
 	fi
 	ninja -C "$BUILD/libdrm" -j"$JOBS" install
 }
@@ -55,7 +62,7 @@ stage_libva() {
 	if [ ! -f "$BUILD/libva/build.ninja" ]; then
 		meson setup "$BUILD/libva" "$SRC/libva" --prefix="$PREFIX" \
 			--libdir=lib --datadir=data --includedir=develop/headers \
-			--buildtype=release "-Dc_args=$POSITIVE" -Dc_link_args=$MAPPER \
+			--buildtype=release "-Dc_args=$POSITIVE" "-Dc_link_args=$MAPPER" \
 			-Ddisable_drm=false -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no \
 			-Dwith_win32=no
 	fi
@@ -78,7 +85,7 @@ stage_mesa_configure() {
 	meson setup "$BUILD/mesa" "$SRC/mesa" --prefix="$PREFIX" --libdir=lib \
 		--includedir=develop/headers --buildtype=release --wrap-mode=nofallback \
 		"-Dc_args=$TLS $POSITIVE" "-Dcpp_args=$TLS $POSITIVE" \
-		-Dc_link_args=$MAPPER -Dcpp_link_args=$MAPPER \
+		"-Dc_link_args=$MAPPER" "-Dcpp_link_args=$MAPPER" \
 		-Dplatforms=haiku -Degl=enabled -Dglvnd=enabled -Dglx=disabled \
 		-Dgbm=disabled -Dopengl=true -Dgles1=disabled -Dgles2=enabled \
 		-Dgallium-drivers=radeonsi,llvmpipe,softpipe \
