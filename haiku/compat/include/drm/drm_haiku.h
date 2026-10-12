@@ -28,6 +28,7 @@ struct drm_haiku_map {
 };
 
 #define DRM_HAIKU_MAP_WRITE	0x1
+#define DRM_HAIKU_MAP_CLONEABLE	0x2	/* other teams may clone the area */
 
 struct drm_haiku_unmap {
 	__u64 address;		/* in: address DRM_HAIKU_IOCTL_MAP returned */

@@ -18,6 +18,7 @@
 
 #include <driver_settings.h>
 #include <Drivers.h>
+#include <graphic_driver.h>
 #include <KernelExport.h>
 #include <PCI.h>
 #include <OS.h>
@@ -221,7 +222,8 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 
 	uint32 memoryType = caching == 1 ? B_WRITE_COMBINING_MEMORY
 		: caching == 0 ? B_UNCACHED_MEMORY : B_WRITE_BACK_MEMORY;
-	uint32 protection = B_READ_AREA | ((request->flags & 1) ? B_WRITE_AREA : 0);
+	uint32 protection = B_READ_AREA | ((request->flags & 1) ? B_WRITE_AREA : 0)
+		| ((request->flags & 2) ? B_CLONEABLE_AREA : 0);
 	void* address = (void*)(addr_t)request->address;
 	addr_t size = request->size;
 	uint32 addressSpec = address != NULL ? B_EXACT_ADDRESS : B_ANY_ADDRESS;
@@ -464,6 +466,14 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			(unsigned int)(addr_t)buffer));
 	}
 #endif
+
+	if (op == B_GET_ACCELERANT_SIGNATURE) {
+		static const char kSignature[] = "amdgpu_kms.accelerant";
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_strlcpy((char*)buffer, kSignature, length) < B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
+	}
 
 	// everything of type 'd' is a DRM ioctl
 	if (((op >> 8) & 0xff) == 'd')
@@ -878,8 +888,8 @@ init_driver(void)
 		return B_ENTRY_NOT_FOUND;
 	}
 
-	int minors[kMaxDevices];
-	int count = lx_glue_minors(minors, kMaxDevices);
+	int minors[kMaxDevices / 2];
+	int count = lx_glue_minors(minors, kMaxDevices / 2);
 	for (int i = 0; i < count; i++) {
 		char name[32];
 		if (minors[i] >= 128)
@@ -889,6 +899,14 @@ init_driver(void)
 		sDeviceNames[sDeviceCount] = strdup(name);
 		sDeviceMinors[sDeviceCount] = minors[i];
 		sDeviceCount++;
+		if (minors[i] < 128) {
+			// app_server looks for displays in /dev/graphics only: the same
+			// primary node there, which names the KMS accelerant
+			snprintf(name, sizeof(name), "graphics/amdgpu_drm_%d", minors[i]);
+			sDeviceNames[sDeviceCount] = strdup(name);
+			sDeviceMinors[sDeviceCount] = minors[i];
+			sDeviceCount++;
+		}
 	}
 	sDeviceNames[sDeviceCount] = NULL;
 	TRACE("%d GPU(s), %d device(s)\n", gpus, sDeviceCount);
