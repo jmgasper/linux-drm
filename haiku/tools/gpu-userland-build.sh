@@ -8,7 +8,9 @@
 #
 # Environment: GPU_ROOT (default /boot/home/gpu-userland), GPU_JOBS (16),
 # MESA_VULKAN_DRIVERS (default none; "amd" for RADV), MESA_GALLIUM_VA
-# (default disabled; "enabled" builds radeonsi_drv_video), GPU_PREFIX (default
+# (default disabled; "enabled" builds radeonsi_drv_video), MESA_PLATFORMS
+# (default haiku; "haiku,wayland" adds VK_KHR_wayland_surface and EGL on
+# Wayland, for Haiku's in-process Wayland server), GPU_PREFIX (default
 # $GPU_ROOT/prefix; /boot/system/non-packaged installs it for the system,
 # from build trees of its own).
 #
@@ -86,7 +88,7 @@ stage_mesa_configure() {
 		--includedir=develop/headers --buildtype=release --wrap-mode=nofallback \
 		"-Dc_args=$TLS $POSITIVE" "-Dcpp_args=$TLS $POSITIVE" \
 		"-Dc_link_args=$MAPPER" "-Dcpp_link_args=$MAPPER" \
-		-Dplatforms=haiku -Degl=enabled -Dglvnd=enabled -Dglx=disabled \
+		"-Dplatforms=${MESA_PLATFORMS:-haiku}" -Degl=enabled -Dglvnd=enabled -Dglx=disabled \
 		-Dgbm=disabled -Dopengl=true -Dgles1=disabled -Dgles2=enabled \
 		-Dgallium-drivers=radeonsi,llvmpipe,softpipe \
 		"-Dvulkan-drivers=${MESA_VULKAN_DRIVERS:-}" \
@@ -106,6 +108,12 @@ stage_mesa() {
 	mkdir -p "$PREFIX/add-ons/opengl/egl_vendor.d"
 	cp -f "$PREFIX/data/glvnd/egl_vendor.d/50_mesa.json" \
 		"$PREFIX/add-ons/opengl/egl_vendor.d/"
+	# and the Vulkan loader for drivers in add-ons/vulkan/icd.d
+	if [ -f "$PREFIX/data/vulkan/icd.d/radeon_icd.x86_64.json" ]; then
+		mkdir -p "$PREFIX/add-ons/vulkan/icd.d"
+		cp -f "$PREFIX/data/vulkan/icd.d/radeon_icd.x86_64.json" \
+			"$PREFIX/add-ons/vulkan/icd.d/"
+	fi
 }
 
 # libavcodec with VA-API, static, for the amdgpu_va media add-on (H.264 and
