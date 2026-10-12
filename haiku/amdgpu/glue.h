@@ -34,6 +34,7 @@ void *lx_glue_map(void *file, unsigned long long offset, unsigned long size,
 void lx_glue_unmap(void *mapping);
 int lx_glue_is_error(const void *pointer);
 int lx_glue_selftest(void);
+int lx_glue_fake_device_start(void);
 
 #ifdef __cplusplus
 }

@@ -19,6 +19,8 @@ SSH="ssh -F $CONFIG -o ConnectTimeout=10 ws-haiku"
 NP=/boot/home/config/non-packaged
 DRV=$NP/add-ons/kernel/drivers
 
+# no start from the file system events of this installation
+$SSH "rm -f /boot/home/config/settings/kernel/drivers/amdgpu_drm.arm; sync"
 if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
 	echo "amdgpu_drm is loaded on the workstation; power cycle it first" >&2
 	exit 1
@@ -27,6 +29,11 @@ fi
 tar -C "$FIRMWARE" -cf - . | $SSH "mkdir -p $NP/data/firmware && tar -xmf - -C $NP/data/firmware"
 $SSH "cat > $DRV/bin/amdgpu_drm.tmp && chmod 755 $DRV/bin/amdgpu_drm.tmp && mv -f $DRV/bin/amdgpu_drm.tmp $DRV/bin/amdgpu_drm" < "$ROOT/out/amdgpu_drm"
 $SSH "rm -rf $DRV/dev/amdgpu_test && mkdir -p $DRV/dev/dri && ln -sf ../../bin/amdgpu_drm $DRV/dev/dri/amdgpu_drm && sync"
+# the test programs, built on the workstation
+tar -C "$ROOT" -cf - haiku/tests linux/include/uapi/drm haiku/compat/include/drm/drm_haiku.h \
+	| $SSH "mkdir -p /boot/home/amdgpu-drm && cd /boot/home/amdgpu-drm && tar -xmf - \
+		&& gcc -O2 -o rescan haiku/tests/rescan.c \
+		&& gcc -O2 -Ilinux/include/uapi -Ihaiku/compat/include -o amdgpu_smoke haiku/tests/amdgpu_smoke.c"
 local=$(sha256sum "$ROOT/out/amdgpu_drm" | cut -d' ' -f1)
 remote=$($SSH "sha256sum $DRV/bin/amdgpu_drm" | cut -d' ' -f1)
 [ "$local" = "$remote" ] || { echo "checksum mismatch" >&2; exit 1; }

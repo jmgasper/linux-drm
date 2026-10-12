@@ -51,7 +51,12 @@ static const int kLinuxETIMEDOUT = 110;
 // #pragma mark - output, time, processors
 
 
+/*	The log file must exist already, preallocated (zeros): it is overwritten
+	from the start and never grows, so that a synced write changes no file
+	system structure that a crash right after it could lose. */
 static int sLogFile = -1;
+static off_t sLogPosition;
+static off_t sLogSize;
 static mutex sLogFileLock = MUTEX_INITIALIZER("amdgpu_drm log file");
 
 
@@ -65,10 +70,18 @@ lx_haiku_log_file(const char* path)
 	}
 	if (path == NULL || path[0] == '\0')
 		return 0;
-	int fd = _kern_open(-1, path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	int fd = _kern_open(-1, path, O_WRONLY, 0);
 	if (fd < 0)
 		return -kLinuxEIO;
+	struct stat st;
+	if (_kern_read_stat(fd, NULL, false, &st, sizeof(st)) != B_OK
+		|| st.st_size <= 0) {
+		_kern_close(fd);
+		return -kLinuxEIO;
+	}
 	sLogFile = fd;
+	sLogPosition = 0;
+	sLogSize = st.st_size;
 	return 0;
 }
 
@@ -79,9 +92,11 @@ lx_haiku_log(const char* text)
 	dprintf("%s", text);
 	if (sLogFile >= 0 && are_interrupts_enabled()) {
 		MutexLocker locker(sLogFileLock);
-		if (sLogFile >= 0) {
-			_kern_write(sLogFile, -1, text, strlen(text));
-			_kern_fsync(sLogFile, false);
+		size_t length = strlen(text);
+		if (sLogFile >= 0 && sLogPosition + (off_t)length <= sLogSize) {
+			_kern_write(sLogFile, sLogPosition, text, length);
+			sLogPosition += length;
+			_kern_fsync(sLogFile, true);
 		}
 	}
 }

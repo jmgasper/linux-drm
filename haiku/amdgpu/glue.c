@@ -15,6 +15,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_ioctl.h>
 #include <drm/drm_vma_manager.h>
 
 #include "glue.h"
@@ -52,6 +53,23 @@ extern const struct lx_param __stop_lx_params[];
 #define MAX_GPUS 8
 static struct pci_dev *probed[MAX_GPUS];
 static int probed_count;
+static struct drm_device *fake_drm;
+
+
+/* the DRM devices: the probed GPUs, and the self test's fake one */
+static int
+drm_devices(struct drm_device **devices, int max)
+{
+	int count = 0, i;
+	for (i = 0; i < probed_count && count < max; i++) {
+		struct drm_device *dev = pci_get_drvdata(probed[i]);
+		if (dev != NULL)
+			devices[count++] = dev;
+	}
+	if (fake_drm != NULL && count < max)
+		devices[count++] = fake_drm;
+	return count;
+}
 
 
 /* #pragma mark - parameters */
@@ -173,9 +191,12 @@ lx_glue_probe(int bus, int device, int function)
 }
 
 
+void lx_glue_fake_device_stop(void);
+
 void
 lx_glue_uninit(void)
 {
+	lx_glue_fake_device_stop();
 	while (probed_count > 0) {
 		struct pci_dev *pdev = probed[--probed_count];
 		if (pdev->driver != NULL && pdev->driver->remove != NULL)
@@ -204,11 +225,11 @@ lx_glue_uninit(void)
 int
 lx_glue_minors(int *minors, int max)
 {
+	struct drm_device *devices[MAX_GPUS + 1];
+	int deviceCount = drm_devices(devices, MAX_GPUS + 1);
 	int count = 0, i;
-	for (i = 0; i < probed_count; i++) {
-		struct drm_device *dev = pci_get_drvdata(probed[i]);
-		if (dev == NULL)
-			continue;
+	for (i = 0; i < deviceCount; i++) {
+		struct drm_device *dev = devices[i];
 		if (dev->primary != NULL && count < max)
 			minors[count++] = dev->primary->index;
 		if (dev->render != NULL && count < max)
@@ -242,11 +263,10 @@ lx_glue_minor_location(int minor, int *bus, int *device, int *function)
 static struct drm_device *
 drm_device_of_minor(int minor)
 {
-	int i;
-	for (i = 0; i < probed_count; i++) {
-		struct drm_device *dev = pci_get_drvdata(probed[i]);
-		if (dev == NULL)
-			continue;
+	struct drm_device *devices[MAX_GPUS + 1];
+	int count = drm_devices(devices, MAX_GPUS + 1), i;
+	for (i = 0; i < count; i++) {
+		struct drm_device *dev = devices[i];
 		if ((dev->primary != NULL && dev->primary->index == minor)
 			|| (dev->render != NULL && dev->render->index == minor))
 			return dev;
@@ -620,6 +640,9 @@ lx_glue_selftest(void)
 	xa_init_flags(&xa, XA_FLAGS_ALLOC1);
 	result = xa_alloc(&xa, &id, &xa, xa_limit_32b, GFP_KERNEL);
 	SELFTEST(result == 0 && id == 1 && xa_load(&xa, 1) == &xa, "xa_alloc");
+	xa_lock(&xa);
+	SELFTEST(xa_load(&xa, 1) == &xa, "xa_load with xa_lock held");
+	xa_unlock(&xa);
 	xa_erase(&xa, 1);
 	SELFTEST(xa_empty(&xa), "xa_erase");
 	xa_destroy(&xa);
@@ -675,4 +698,67 @@ lx_glue_selftest(void)
 
 	pr_info("amdgpu selftest: %d failure(s)\n", failures);
 	return failures;
+}
+
+
+/* #pragma mark - fake device */
+
+/*	A DRM device without hardware ("haiku_selftest 2"), so that opening
+	/dev/dri nodes, ioctls and closing can be tried in a virtual machine. */
+
+static const struct file_operations fake_fops = {
+	.owner = THIS_MODULE,
+	.open = drm_open,
+	.release = drm_release,
+	.unlocked_ioctl = drm_ioctl,
+	.poll = drm_poll,
+	.read = drm_read,
+	.llseek = noop_llseek,
+	.mmap = drm_gem_mmap,
+	.fop_flags = FOP_UNSIGNED_OFFSET,
+};
+
+static const struct drm_driver fake_driver = {
+	.driver_features = DRIVER_GEM | DRIVER_RENDER,
+	.fops = &fake_fops,
+	.name = "haiku_fake",
+	.desc = "Haiku compat test device",
+	.major = 1,
+	.minor = 0,
+};
+
+static struct device fake_parent;
+
+
+int
+lx_glue_fake_device_start(void)
+{
+	int error;
+	device_initialize(&fake_parent);
+	dev_set_name(&fake_parent, "haiku-fake");
+	fake_drm = drm_dev_alloc(&fake_driver, &fake_parent);
+	if (IS_ERR(fake_drm)) {
+		error = PTR_ERR(fake_drm);
+		fake_drm = NULL;
+		return error;
+	}
+	error = drm_dev_register(fake_drm, 0);
+	if (error != 0) {
+		drm_dev_put(fake_drm);
+		fake_drm = NULL;
+		return error;
+	}
+	pr_info("amdgpu selftest: fake DRM device registered\n");
+	return 0;
+}
+
+
+void
+lx_glue_fake_device_stop(void)
+{
+	if (fake_drm == NULL)
+		return;
+	drm_dev_unregister(fake_drm);
+	drm_dev_put(fake_drm);
+	fake_drm = NULL;
 }

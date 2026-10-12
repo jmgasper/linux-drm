@@ -76,10 +76,15 @@ xa_visible(void *entry)
 }
 
 
+#define slots_lock(xa)		spin_lock(&(xa)->lx_slots_lock)
+#define slots_unlock(xa)	spin_unlock(&(xa)->lx_slots_lock)
+
+
 void
 xa_init_flags(struct xarray *xa, gfp_t flags)
 {
 	spin_lock_init(&xa->xa_lock);
+	spin_lock_init(&xa->lx_slots_lock);
 	xa->xa_flags = flags;
 	xa->slots = NULL;
 	xa->count = 0;
@@ -91,12 +96,12 @@ xa_init_flags(struct xarray *xa, gfp_t flags)
 void
 xa_destroy(struct xarray *xa)
 {
-	xa_lock(xa);
+	slots_lock(xa);
 	kfree(xa->slots);
 	xa->slots = NULL;
 	xa->count = 0;
 	xa->capacity = 0;
-	xa_unlock(xa);
+	slots_unlock(xa);
 }
 
 
@@ -106,17 +111,17 @@ xa_load(struct xarray *xa, unsigned long index)
 	bool found;
 	void *entry = NULL;
 	int position;
-	xa_lock(xa);
+	slots_lock(xa);
 	position = xa_search(xa, index, &found);
 	if (found)
 		entry = xa_visible(xa->slots[position].entry);
-	xa_unlock(xa);
+	slots_unlock(xa);
 	return entry;
 }
 
 
-void *
-__xa_store(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
+static void *
+__xa_store_slots(struct xarray *xa, unsigned long index, void *entry)
 {
 	bool found;
 	int position = xa_search(xa, index, &found);
@@ -133,6 +138,17 @@ __xa_store(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
 	if (xa_insert_at(xa, position, index, entry) != 0)
 		return XA_ERROR(-ENOMEM);
 	return NULL;
+}
+
+
+void *
+__xa_store(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
+{
+	void *old;
+	slots_lock(xa);
+	old = __xa_store_slots(xa, index, entry);
+	slots_unlock(xa);
+	return old;
 }
 
 
@@ -170,18 +186,24 @@ __xa_cmpxchg(struct xarray *xa, unsigned long index, void *old, void *entry,
 	gfp_t gfp)
 {
 	bool found;
-	int position = xa_search(xa, index, &found);
-	void *current_entry = found ? xa->slots[position].entry : NULL;
+	int position;
+	void *current_entry, *result;
+	slots_lock(xa);
+	position = xa_search(xa, index, &found);
+	current_entry = found ? xa->slots[position].entry : NULL;
+	result = xa_visible(current_entry);
 	if (current_entry != old && xa_visible(current_entry) != old)
-		return xa_visible(current_entry);
+		goto out;
 	if (entry == NULL) {
 		if (found)
 			xa_remove_at(xa, position);
 	} else if (found)
 		xa->slots[position].entry = entry;
 	else if (xa_insert_at(xa, position, index, entry) != 0)
-		return XA_ERROR(-ENOMEM);
-	return xa_visible(current_entry);
+		result = XA_ERROR(-ENOMEM);
+out:
+	slots_unlock(xa);
+	return result;
 }
 
 
@@ -201,11 +223,16 @@ int
 __xa_insert(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
 {
 	bool found;
-	int position = xa_search(xa, index, &found);
+	int position, error;
+	slots_lock(xa);
+	position = xa_search(xa, index, &found);
 	if (found)
-		return -EBUSY;
-	return xa_insert_at(xa, position, index,
-		entry != NULL ? entry : XA_ZERO_ENTRY);
+		error = -EBUSY;
+	else
+		error = xa_insert_at(xa, position, index,
+			entry != NULL ? entry : XA_ZERO_ENTRY);
+	slots_unlock(xa);
+	return error;
 }
 
 
@@ -257,11 +284,14 @@ __xa_alloc(struct xarray *xa, u32 *id, void *entry, struct xa_limit limit,
 	gfp_t gfp)
 {
 	bool found;
-	int error = xa_find_free(xa, limit.min, limit, id);
-	if (error != 0)
-		return error;
-	return xa_insert_at(xa, xa_search(xa, *id, &found), *id,
-		entry != NULL ? entry : XA_ZERO_ENTRY);
+	int error;
+	slots_lock(xa);
+	error = xa_find_free(xa, limit.min, limit, id);
+	if (error == 0)
+		error = xa_insert_at(xa, xa_search(xa, *id, &found), *id,
+			entry != NULL ? entry : XA_ZERO_ENTRY);
+	slots_unlock(xa);
+	return error;
 }
 
 
@@ -283,15 +313,17 @@ __xa_alloc_cyclic(struct xarray *xa, u32 *id, void *entry,
 {
 	bool found;
 	int wrapped = 0;
-	int error = xa_find_free(xa, *next, limit, id);
+	int error;
+	slots_lock(xa);
+	error = xa_find_free(xa, *next, limit, id);
 	if (error == -EBUSY) {
 		error = xa_find_free(xa, limit.min, limit, id);
 		wrapped = 1;
 	}
-	if (error != 0)
-		return error;
-	error = xa_insert_at(xa, xa_search(xa, *id, &found), *id,
-		entry != NULL ? entry : XA_ZERO_ENTRY);
+	if (error == 0)
+		error = xa_insert_at(xa, xa_search(xa, *id, &found), *id,
+			entry != NULL ? entry : XA_ZERO_ENTRY);
+	slots_unlock(xa);
 	if (error != 0)
 		return error;
 	*next = *id + 1;
@@ -331,7 +363,7 @@ xa_find_from(struct xarray *xa, unsigned long *index, unsigned long first,
 	bool found;
 	unsigned int position;
 	void *entry = NULL;
-	xa_lock(xa);
+	slots_lock(xa);
 	for (position = xa_search(xa, first, &found); position < xa->count;
 			position++) {
 		struct lx_xa_slot *slot = &xa->slots[position];
@@ -343,7 +375,7 @@ xa_find_from(struct xarray *xa, unsigned long *index, unsigned long first,
 			break;
 		}
 	}
-	xa_unlock(xa);
+	slots_unlock(xa);
 	return entry;
 }
 
@@ -371,12 +403,12 @@ xa_get_mark(struct xarray *xa, unsigned long index, xa_mark_t mark)
 {
 	bool found, marked = false;
 	int position;
-	xa_lock(xa);
+	slots_lock(xa);
 	position = xa_search(xa, index, &found);
 	if (found)
 		marked = (xa->slots[position].marks
 			& (1U << (__force unsigned)mark)) != 0;
-	xa_unlock(xa);
+	slots_unlock(xa);
 	return marked;
 }
 
@@ -386,11 +418,11 @@ xa_set_mark(struct xarray *xa, unsigned long index, xa_mark_t mark)
 {
 	bool found;
 	int position;
-	xa_lock(xa);
+	slots_lock(xa);
 	position = xa_search(xa, index, &found);
 	if (found)
 		xa->slots[position].marks |= 1U << (__force unsigned)mark;
-	xa_unlock(xa);
+	slots_unlock(xa);
 }
 
 
@@ -399,11 +431,11 @@ xa_clear_mark(struct xarray *xa, unsigned long index, xa_mark_t mark)
 {
 	bool found;
 	int position;
-	xa_lock(xa);
+	slots_lock(xa);
 	position = xa_search(xa, index, &found);
 	if (found)
 		xa->slots[position].marks &= ~(1U << (__force unsigned)mark);
-	xa_unlock(xa);
+	slots_unlock(xa);
 }
 
 
@@ -477,13 +509,13 @@ idr_replace(struct idr *idr, void *ptr, unsigned long id)
 	int position;
 	void *old = ERR_PTR(-ENOENT);
 	struct xarray *xa = &idr->idr_rt;
-	xa_lock(xa);
+	slots_lock(xa);
 	position = xa_search(xa, id - idr->idr_base, &found);
 	if (found) {
 		old = xa_visible(xa->slots[position].entry);
 		xa->slots[position].entry = ptr != NULL ? ptr : XA_ZERO_ENTRY;
 	}
-	xa_unlock(xa);
+	slots_unlock(xa);
 	return old;
 }
 
@@ -559,11 +591,11 @@ ida_free(struct ida *ida, unsigned int id)
 	struct xarray *xa = &ida->xa;
 	bool found;
 	int position;
-	xa_lock(xa);
+	slots_lock(xa);
 	position = xa_search(xa, id, &found);
 	if (found)
 		xa_remove_at(xa, position);
-	xa_unlock(xa);
+	slots_unlock(xa);
 }
 
 
@@ -583,7 +615,7 @@ lx_radix_tree_next(struct xarray *root, struct radix_tree_iter *iter, int tag)
 	bool found;
 	unsigned int position;
 	void **slot = NULL;
-	xa_lock(root);
+	slots_lock(root);
 	for (position = xa_search(root, iter->next_index, &found);
 			position < root->count; position++) {
 		struct lx_xa_slot *s = &root->slots[position];
@@ -596,7 +628,7 @@ lx_radix_tree_next(struct xarray *root, struct radix_tree_iter *iter, int tag)
 		slot = &s->entry;
 		break;
 	}
-	xa_unlock(root);
+	slots_unlock(root);
 	/* The slot may move when the array changes; the callers only read it
 	   and delete through the index before asking for the next one. */
 	return slot;

@@ -533,9 +533,10 @@ kasprintf(unsigned int gfp, const char *fmt, ...)
 static int printk_delay_us;
 module_param(printk_delay_us, int, 0644);
 
-/*	Bring-up aid: also append every message to this file and sync it, so the
+/*	Bring-up aid: also write every message to this file and sync it, so the
 	messages before a crash survive the power cycle (settings:
-	"log_file /boot/home/amdgpu_drm.log"). */
+	"log_file /boot/home/amdgpu_drm.log"). The file must exist, filled with
+	zeros (x399-arm.sh makes it): it is overwritten, never extended. */
 static char *log_file;
 module_param(log_file, charp, 0444);
 

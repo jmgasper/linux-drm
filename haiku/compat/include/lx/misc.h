@@ -96,8 +96,13 @@ struct lx_xa_slot {
 	unsigned int marks;
 };
 
+/*	xa_lock is the lock callers take around the __xa_*() functions, as in
+	Linux; the slots are guarded by an internal lock of their own, so the
+	reads Linux does without locks (xa_load(), xa_find() ...) also work
+	while the caller holds xa_lock. */
 struct xarray {
 	spinlock_t xa_lock;
+	spinlock_t lx_slots_lock;
 	gfp_t xa_flags;
 	struct lx_xa_slot *slots;
 	unsigned int count;

@@ -58,6 +58,23 @@ static const uint32 kDrmHaikuMap = LX_IOC(3, 'd', 0xf0,
 	sizeof(drm_haiku_map));
 static const uint32 kDrmHaikuUnmap = LX_IOC(1, 'd', 0xf1,
 	sizeof(drm_haiku_unmap));
+struct drm_haiku_device_info {
+	uint32	minor;
+	uint32	node_type;
+	uint16	domain;
+	uint8	bus;
+	uint8	dev;
+	uint8	func;
+	uint8	revision_id;
+	uint16	vendor_id;
+	uint16	device_id;
+	uint16	subvendor_id;
+	uint16	subdevice_id;
+	uint32	class_code;
+	uint32	reserved[4];
+};
+static const uint32 kDrmHaikuDeviceInfo = LX_IOC(2, 'd', 0xf2,
+	sizeof(drm_haiku_device_info));
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -350,6 +367,41 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 		return unmap_buffer(cookie, request.address);
 	}
 
+	if (op == kDrmHaikuDeviceInfo) {
+		drm_haiku_device_info info = {};
+		int bus, device, function;
+		if (lx_glue_minor_location(cookie->minor, &bus, &device, &function)
+				!= 0)
+			return ENODEV;
+		info.minor = cookie->minor;
+		info.node_type = cookie->minor >= 128 ? 2 : 0;
+		info.bus = bus;
+		info.dev = device;
+		info.func = function;
+		pci_module_info* pci;
+		if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) == B_OK) {
+			pci_info pciInfo;
+			for (int32 i = 0; pci->get_nth_pci_info(i, &pciInfo) == B_OK; i++) {
+				if (pciInfo.bus != bus || pciInfo.device != device
+					|| pciInfo.function != function)
+					continue;
+				info.vendor_id = pciInfo.vendor_id;
+				info.device_id = pciInfo.device_id;
+				info.revision_id = pciInfo.revision;
+				info.class_code = (pciInfo.class_base << 16)
+					| (pciInfo.class_sub << 8) | pciInfo.class_api;
+				info.subvendor_id = pciInfo.u.h0.subsystem_vendor_id;
+				info.subdevice_id = pciInfo.u.h0.subsystem_id;
+				break;
+			}
+			put_module(B_PCI_MODULE_NAME);
+		}
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(buffer, &info, sizeof(info)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
+	}
+
 	// everything of type 'd' is a DRM ioctl
 	if (((op >> 8) & 0xff) == 'd')
 		return haiku_status(lx_glue_ioctl(cookie->file, op, buffer));
@@ -461,17 +513,19 @@ static device_hooks sDeviceHooks = {
 // #pragma mark - driver
 
 
-static bool sSelfTest;
+static int sSelfTest;
 
 
-static bool
+/* 0: none, 1: test the compat layer and stop, 2: also run a fake DRM device */
+static int
 self_test_requested()
 {
 	void* handle = load_driver_settings(DRIVER_NAME);
 	if (handle == NULL)
-		return false;
-	bool selfTest = get_driver_boolean_parameter(handle, "haiku_selftest",
-		false, true);
+		return 0;
+	const char* value = get_driver_parameter(handle, "haiku_selftest", "0",
+		"1");
+	int selfTest = strtol(value, NULL, 10);
 	unload_driver_settings(handle);
 	return selfTest;
 }
@@ -501,22 +555,47 @@ is_amd_gpu(const pci_info& info)
 }
 
 
-/*	Lab builds (AMDGPU_DRM_ARMED_ONLY) start only when the arm file exists,
-	and delete it first: a start that brings the machine down cannot repeat
-	on the next boot, when nobody may be there to pick another boot option. */
+/*	Lab builds (AMDGPU_DRM_ARMED_ONLY) start only when the arm file was made
+	during this boot: devfs may reload the driver any number of times in the
+	boot it was armed in, but a start that brought the machine down cannot
+	repeat on the next boot, when nobody may be there to pick another boot
+	option. A stale arm file is deleted. */
 #ifdef AMDGPU_DRM_ARMED_ONLY
 static const char* kArmFile
 	= "/boot/home/config/settings/kernel/drivers/amdgpu_drm.arm";
 
 static bool
-consume_arm_file()
+armed_for_this_boot()
 {
 	struct stat st;
 	if (stat(kArmFile, &st) != 0)
 		return false;
+	time_t bootTime = real_time_clock() - system_time() / 1000000;
+	if (st.st_mtime + 5 >= bootTime)
+		return true;
 	_kern_unlink(-1, kArmFile);
 	_kern_sync();
-	return true;
+	return false;
+}
+#endif
+
+
+#ifdef AMDGPU_DRM_ARMED_ONLY
+/*	devfs reloads a driver none of whose devices is open whenever a file
+	system event marks its binary as changed, and the lab's installation and
+	arming cause such events. Like app_server would, keep a device open. */
+static int sPinFile = -1;
+
+static status_t
+pin_thread(void*)
+{
+	snooze(200000);
+	int fd = _kern_open(-1, "/dev/dri/card0", O_RDWR, 0);
+	if (fd < 0)
+		TRACE("could not keep /dev/dri/card0 open: %s\n", strerror(fd));
+	else
+		sPinFile = fd;
+	return B_OK;
 }
 #endif
 
@@ -524,20 +603,13 @@ consume_arm_file()
 status_t
 init_hardware(void)
 {
-#ifdef AMDGPU_DRM_ARMED_ONLY
-	if (!consume_arm_file()) {
-		TRACE("not armed (%s), not starting\n", kArmFile);
-		return B_ERROR;
-	}
-#endif
 
 	pci_module_info* pci;
 	if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) != B_OK)
 		return B_ERROR;
 	pci_info info;
 	status_t status = B_ENTRY_NOT_FOUND;
-	sSelfTest = self_test_requested();
-	if (sSelfTest)
+	if (self_test_requested())
 		status = B_OK;
 	for (int32 i = 0; pci->get_nth_pci_info(i, &info) == B_OK; i++) {
 		if (is_amd_gpu(info)) {
@@ -553,10 +625,19 @@ init_hardware(void)
 status_t
 init_driver(void)
 {
+#ifdef AMDGPU_DRM_ARMED_ONLY
+	// every start, also devfs reloading the driver later
+	if (!armed_for_this_boot()) {
+		TRACE("not armed (%s), not starting\n", kArmFile);
+		return B_ERROR;
+	}
+#endif
+
 	pci_module_info* pci;
 	if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) != B_OK)
 		return B_ERROR;
 
+	sSelfTest = self_test_requested();
 	TRACE("starting Linux DRM and amdgpu\n");
 	apply_settings();
 	int error = lx_glue_init();
@@ -567,19 +648,24 @@ init_driver(void)
 	}
 	sStarted = true;
 
-	if (sSelfTest) {
-		int failures = lx_glue_selftest();
-		TRACE("self test: %d failure(s); stopping again\n", failures);
-		lx_glue_uninit();
-		sStarted = false;
-		put_module(B_PCI_MODULE_NAME);
-		TRACE("self test: stopped\n");
-		return B_ERROR;
-	}
-
 	pci_info info;
 	int gpus = 0;
-	for (int32 i = 0; pci->get_nth_pci_info(i, &info) == B_OK; i++) {
+	if (sSelfTest != 0) {
+		int failures = lx_glue_selftest();
+		if (sSelfTest == 1) {
+			TRACE("self test: %d failure(s); stopping again\n", failures);
+			lx_glue_uninit();
+			sStarted = false;
+			put_module(B_PCI_MODULE_NAME);
+			TRACE("self test: stopped\n");
+			return B_ERROR;
+		}
+		if (lx_glue_fake_device_start() == 0)
+			gpus++;
+	}
+
+	for (int32 i = 0; sSelfTest == 0
+			&& pci->get_nth_pci_info(i, &info) == B_OK; i++) {
 		if (!is_amd_gpu(info))
 			continue;
 		if (lx_glue_probe(info.bus, info.device, info.function) == 0)
@@ -609,6 +695,13 @@ init_driver(void)
 	}
 	sDeviceNames[sDeviceCount] = NULL;
 	TRACE("%d GPU(s), %d device(s)\n", gpus, sDeviceCount);
+#ifdef AMDGPU_DRM_ARMED_ONLY
+	// after publish_devices(), which follows init_driver()
+	thread_id pin = spawn_kernel_thread(pin_thread, "amdgpu_drm pin",
+		B_NORMAL_PRIORITY, NULL);
+	if (pin >= 0)
+		resume_thread(pin);
+#endif
 	return B_OK;
 }
 
@@ -616,6 +709,12 @@ init_driver(void)
 void
 uninit_driver(void)
 {
+#ifdef AMDGPU_DRM_ARMED_ONLY
+	if (sPinFile >= 0) {
+		_kern_close(sPinFile);
+		sPinFile = -1;
+	}
+#endif
 	for (int i = 0; i < sDeviceCount; i++)
 		free(sDeviceNames[i]);
 	sDeviceCount = 0;

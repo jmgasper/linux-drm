@@ -2675,6 +2675,7 @@ drivers/gpu/drm/ttm/ttm_range_manager.c
 drivers/gpu/drm/ttm/ttm_resource.c
 drivers/gpu/drm/ttm/ttm_sys_manager.c
 drivers/gpu/drm/ttm/ttm_tt.c
+drivers/i2c/algos/i2c-algo-bit.c
 drivers/video/hdmi.c
 include/asm-generic/bitops/arch_hweight.h
 include/asm-generic/bitops/const_hweight.h
@@ -2994,8 +2995,10 @@ include/vdso/math64.h
 include/vdso/time64.h
 include/vdso/time.h
 include/vdso/unaligned.h
+lib/bitmap.c
 lib/bsearch.c
 lib/ctype.c
+lib/find_bit.c
 lib/hexdump.c
 lib/interval_tree.c
 lib/kfifo.c

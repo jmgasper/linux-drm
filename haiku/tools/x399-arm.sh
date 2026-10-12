@@ -4,9 +4,10 @@
 #   haiku/tools/x399-arm.sh ["param value" ...]
 #
 # Writes the driver settings (Linux module parameters, one per argument),
-# creates the one-shot arm file and links the add-on into dev/dri again,
-# which devfs sees as a new driver and probes. The driver deletes the arm
-# file before it touches the GPU.
+# creates the arm file and links the add-on into dev/dri again, which devfs
+# sees as a new driver and probes. The arm file is good for this boot only:
+# after a crash, the next boot does not start the driver. Then waits for the
+# start.
 set -euo pipefail
 CONFIG=/mnt/HaikuWork/x399/ssh/config
 SSH="ssh -F $CONFIG -o ConnectTimeout=10 ws-haiku"
@@ -18,5 +19,19 @@ for p in "$@"; do
 	params="$params$p
 "
 done
+# the log file the driver overwrites (log_file): 8 MB of zeros, on disk
+$SSH "rm -f /boot/home/amdgpu_drm.log && dd if=/dev/zero of=/boot/home/amdgpu_drm.log bs=1048576 count=8 2>/dev/null && sync"
+# let devfs finish with earlier changes (x399-deploy.sh) first
+sleep 10
 $SSH "mkdir -p $SETTINGS && cat > $SETTINGS/amdgpu_drm && touch $SETTINGS/amdgpu_drm.arm && rm -f $DRV/dev/dri/amdgpu_drm && sync && sleep 2 && ln -s ../../bin/amdgpu_drm $DRV/dev/dri/amdgpu_drm && sync" <<< "$params"
 echo "armed with: ${*:-(no parameters)}"
+for i in $(seq 1 60); do
+	sleep 2
+	if $SSH "test -e /dev/dri/card0" 2>/dev/null; then
+		# lab builds keep /dev/dri/card0 open themselves (see driver.cpp)
+		echo "started"
+		exit 0
+	fi
+done
+echo "no /dev/dri/card0 after 2 minutes" >&2
+exit 1

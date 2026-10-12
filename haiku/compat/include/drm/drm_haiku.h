@@ -33,8 +33,27 @@ struct drm_haiku_unmap {
 	__u64 address;		/* in: address DRM_HAIKU_IOCTL_MAP returned */
 };
 
+/*	What Linux's libdrm reads from sysfs and stat(): the node and the PCI
+	device behind a DRM file. */
+struct drm_haiku_device_info {
+	__u32 minor;			/* 0.. card, 128.. render */
+	__u32 node_type;		/* 0 primary, 2 render (libdrm's DRM_NODE_*) */
+	__u16 domain;
+	__u8 bus;
+	__u8 dev;
+	__u8 func;
+	__u8 revision_id;
+	__u16 vendor_id;
+	__u16 device_id;
+	__u16 subvendor_id;
+	__u16 subdevice_id;
+	__u32 class_code;		/* base << 16 | sub << 8 | interface */
+	__u32 reserved[4];
+};
+
 /* 'd' 0xf0..0xff are free in the DRM core range */
 #define DRM_HAIKU_IOCTL_MAP		DRM_IOWR(0xf0, struct drm_haiku_map)
 #define DRM_HAIKU_IOCTL_UNMAP	DRM_IOW(0xf1, struct drm_haiku_unmap)
+#define DRM_HAIKU_IOCTL_DEVICE_INFO	DRM_IOR(0xf2, struct drm_haiku_device_info)
 
 #endif /* _DRM_HAIKU_H */
