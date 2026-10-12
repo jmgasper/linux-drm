@@ -952,6 +952,11 @@ uninit_driver(void)
 	}
 #else
 	stop_stable_timer();
+	if (sStarted) {
+		// an orderly stop: the start did not bring the machine down
+		_kern_unlink(-1, kStartMarker);
+		_kern_sync();
+	}
 #endif
 	for (int i = 0; i < sDeviceCount; i++)
 		free(sDeviceNames[i]);
