@@ -66,6 +66,13 @@ void lx_haiku_event_delete(void *event);
 void lx_haiku_event_signal(void *event);
 /* timeout < 0: forever. 0 when signalled, -ETIMEDOUT otherwise */
 int lx_haiku_event_wait(void *event, long long timeout_us);
+#define LX_HAIKU_WAIT_UNINTERRUPTIBLE	0
+#define LX_HAIKU_WAIT_KILLABLE			1
+#define LX_HAIKU_WAIT_INTERRUPTIBLE		2
+int lx_haiku_event_wait_etc(void *event, long long timeout_us, int interrupt);
+int lx_haiku_signal_pending(int fatal_only);
+void lx_haiku_log_stack(const char *what);
+int lx_haiku_mutex_lock_timeout(void *mutex, long long timeout_us);
 
 /* threads */
 lx_thread_id lx_haiku_current_thread(void);

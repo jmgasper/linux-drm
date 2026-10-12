@@ -72,7 +72,9 @@ worker_main(void *data)
 			DEFINE_WAIT(wait);
 			prepare_to_wait(&wq->more_work, &wait, TASK_UNINTERRUPTIBLE);
 			spin_unlock(&wq->lock);
+			current->lx_idle = 1;
 			schedule();
+			current->lx_idle = 0;
 			finish_wait(&wq->more_work, &wait);
 			spin_lock(&wq->lock);
 		}

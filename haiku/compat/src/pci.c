@@ -481,6 +481,75 @@ pcie_get_speed_cap(struct pci_dev *dev)
 }
 
 
+/* Mb/s per lane after the encoding overhead, as Linux's PCIE_SPEED2MBS_ENC */
+static u32
+link_mbps(enum pci_bus_speed speed)
+{
+	switch (speed) {
+		case PCIE_SPEED_64_0GT: return 64000 * 242 / 256;
+		case PCIE_SPEED_32_0GT: return 32000 * 128 / 130;
+		case PCIE_SPEED_16_0GT: return 16000 * 128 / 130;
+		case PCIE_SPEED_8_0GT: return 8000 * 128 / 130;
+		case PCIE_SPEED_5_0GT: return 5000 * 8 / 10;
+		case PCIE_SPEED_2_5GT: return 2500 * 8 / 10;
+		default: return 0;
+	}
+}
+
+
+static enum pci_bus_speed
+link_speed(u16 status)
+{
+	switch (status & PCI_EXP_LNKSTA_CLS) {
+		case 1: return PCIE_SPEED_2_5GT;
+		case 2: return PCIE_SPEED_5_0GT;
+		case 3: return PCIE_SPEED_8_0GT;
+		case 4: return PCIE_SPEED_16_0GT;
+		case 5: return PCIE_SPEED_32_0GT;
+		case 6: return PCIE_SPEED_64_0GT;
+		default: return PCI_SPEED_UNKNOWN;
+	}
+}
+
+
+/*	Linux's: the bandwidth of the slowest link between the device and the
+	root, with that link's current speed and width. */
+u32
+pcie_bandwidth_available(struct pci_dev *dev, struct pci_dev **limiting_dev,
+	enum pci_bus_speed *speed, enum pcie_link_width *width)
+{
+	u32 bandwidth = 0;
+	if (speed != NULL)
+		*speed = PCI_SPEED_UNKNOWN;
+	if (width != NULL)
+		*width = PCIE_LNK_WIDTH_UNKNOWN;
+	for (; dev != NULL; dev = pci_upstream_bridge(dev)) {
+		u16 status = 0;
+		enum pci_bus_speed next_speed;
+		enum pcie_link_width next_width;
+		u32 next;
+		if (!pci_is_pcie(dev)
+			|| pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &status) != 0)
+			continue;
+		next_speed = link_speed(status);
+		next_width = (status & PCI_EXP_LNKSTA_NLW) >> PCI_EXP_LNKSTA_NLW_SHIFT;
+		next = next_width * link_mbps(next_speed);
+		if (next == 0)
+			continue;
+		if (bandwidth == 0 || next < bandwidth) {
+			bandwidth = next;
+			if (limiting_dev != NULL)
+				*limiting_dev = dev;
+			if (speed != NULL)
+				*speed = next_speed;
+			if (width != NULL)
+				*width = next_width;
+		}
+	}
+	return bandwidth;
+}
+
+
 enum pcie_link_width
 pcie_get_width_cap(struct pci_dev *dev)
 {

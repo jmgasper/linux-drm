@@ -36,11 +36,25 @@ lx_lock_ensure(struct lx_lock *lock)
 }
 
 
+extern int hung_wait_s;
+
 void
 lx_lock_lock(struct lx_lock *lock)
 {
 	lx_lock_ensure(lock);
-	lx_haiku_mutex_lock(lock->haiku);
+	if (hung_wait_s > 0) {
+		if (lx_haiku_mutex_lock_timeout(lock->haiku,
+				(long long)hung_wait_s * 1000000) != 0) {
+			char what[96];
+			snprintf(what, sizeof(what), "waiting for %d s for lock %s, owner "
+				"thread %d", hung_wait_s, lock->name ? lock->name : "?",
+				(int)READ_ONCE(lock->owner));
+			lx_haiku_log_stack(what);
+			lx_haiku_mutex_lock(lock->haiku);
+			pr_info("lx: lock %s: got it\n", lock->name ? lock->name : "?");
+		}
+	} else
+		lx_haiku_mutex_lock(lock->haiku);
 	WRITE_ONCE(lock->owner, lx_haiku_current_thread());
 }
 

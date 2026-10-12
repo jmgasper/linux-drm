@@ -300,7 +300,8 @@ int pci_irq_vector(struct pci_dev *dev, unsigned int nr);
 #define pci_msix_vec_count(dev)	0
 enum pci_bus_speed pcie_get_speed_cap(struct pci_dev *dev);
 enum pcie_link_width pcie_get_width_cap(struct pci_dev *dev);
-#define pcie_bandwidth_available(dev, limiting, speed, width)	0U
+u32 pcie_bandwidth_available(struct pci_dev *dev, struct pci_dev **limiting_dev,
+	enum pci_bus_speed *speed, enum pcie_link_width *width);
 int pcie_get_mps(struct pci_dev *dev);
 #define pcie_set_mps(dev, mps)	0
 #define pcie_get_readrq(dev)	512

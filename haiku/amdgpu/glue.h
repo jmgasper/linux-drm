@@ -35,6 +35,8 @@ void lx_glue_unmap(void *mapping);
 int lx_glue_is_error(const void *pointer);
 int lx_glue_selftest(void);
 int lx_glue_fake_device_start(void);
+int lx_glue_lab_bench(void *file);
+int lx_glue_lab_perf_level(void *file, unsigned int level);
 
 #ifdef __cplusplus
 }

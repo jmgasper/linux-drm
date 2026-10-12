@@ -57,6 +57,7 @@ struct task_struct {
 	void *lx_private;			/* Haiku side */
 	struct kthread *lx_kthread;
 	void *lx_work;				/* worker: the running work item */
+	int lx_idle;				/* waits for work: not a hung wait */
 	int lx_rcu_nesting;
 };
 
@@ -90,10 +91,20 @@ void yield(void);
 #define cond_resched_lock(lock)	({ 0; })
 #define need_resched()			0
 #define cpu_is_offline(cpu)		0
-static inline int signal_pending(struct task_struct *p) { return 0; }
-static inline int fatal_signal_pending(struct task_struct *p) { return 0; }
+/* Haiku's pending signals, for the current thread only (others: none) */
+int lx_haiku_signal_pending(int fatal_only);
+static inline int signal_pending(struct task_struct *p)
+{ return p == current && lx_haiku_signal_pending(0); }
+static inline int fatal_signal_pending(struct task_struct *p)
+{ return p == current && lx_haiku_signal_pending(1); }
 static inline int signal_pending_state(unsigned int state, struct task_struct *p)
-{ return 0; }
+{
+	if (!(state & (TASK_INTERRUPTIBLE | TASK_WAKEKILL)))
+		return 0;
+	if (state & TASK_INTERRUPTIBLE)
+		return signal_pending(p);
+	return fatal_signal_pending(p);
+}
 #define send_sig(sig, p, priv)	0
 #define flush_signals(t)	do { } while (0)
 #define allow_signal(sig)	do { } while (0)

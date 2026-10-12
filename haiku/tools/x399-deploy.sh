@@ -42,7 +42,8 @@ $SSH "rm -rf $DRV/dev/amdgpu_test && mkdir -p $DRV/dev/dri && ln -sf ../../bin/a
 tar -C "$ROOT" -cf - haiku/tests linux/include/uapi/drm haiku/compat/include/drm/drm_haiku.h \
 	| $SSH "mkdir -p /boot/home/amdgpu-drm && cd /boot/home/amdgpu-drm && tar -xmf - \
 		&& gcc -O2 -Ilinux/include/uapi -Ihaiku/compat/include -o amdgpu_smoke haiku/tests/amdgpu_smoke.c \
-		&& gcc -O2 -o lab_unpin haiku/tests/lab_unpin.c"
+		&& gcc -O2 -o lab_unpin haiku/tests/lab_unpin.c \
+		&& gcc -O2 -o lab_bench haiku/tests/lab_bench.c"
 local=$(sha256sum "$BIN" | cut -d' ' -f1)
 remote=$($SSH "sha256sum $DRV/bin/amdgpu_drm" | cut -d' ' -f1)
 [ "$local" = "$remote" ] || { echo "checksum mismatch" >&2; exit 1; }

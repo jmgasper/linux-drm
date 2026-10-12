@@ -30,6 +30,7 @@
 #include <util/DoublyLinkedList.h>
 #include <vm/vm.h>
 #include <vm/VMAddressSpace.h>
+#include <vm/VMArea.h>
 #include <sys/uio.h>
 #include <util/iovec_support.h>
 
@@ -86,12 +87,17 @@ struct drm_haiku_device_info {
 	uint16	subvendor_id;
 	uint16	subdevice_id;
 	uint32	class_code;
-	uint32	reserved[4];
+	uint32	file_id[2];
+	uint32	reserved[2];
 };
 #ifdef AMDGPU_DRM_ARMED_ONLY
 // lab builds: closes the driver's own device file, so that devfs can unload
 // it (to test the teardown: then touch the binary)
 static const uint32 kDrmHaikuLabUnpin = LX_IOC(0, 'd', 0xff, 0);
+// and measures the CPU's bandwidth to VRAM through a kernel mapping
+static const uint32 kDrmHaikuLabBench = LX_IOC(0, 'd', 0xfe, 0);
+// and forces a DPM performance level (argument: the level, by value)
+static const uint32 kDrmHaikuLabPerfLevel = LX_IOC(0, 'd', 0xfd, 0);
 static void lab_unpin();
 #endif
 static const uint32 kDrmHaikuDeviceInfo = LX_IOC(2, 'd', 0xf2,
@@ -238,6 +244,7 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 				vecCount);
 		}
 	}
+	phys_addr_t firstBase = vecs[0].base;
 	delete[] vecs;
 	if (area < 0) {
 		lx_glue_unmap(mapping);
@@ -259,9 +266,18 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 		cookie->mappings.Add(record);
 	}
 
+#ifdef AMDGPU_DRM_ARMED_ONLY
+	uint32 actualType = 0;
+	{
+		VMArea* vmArea = VMAreas::Lookup(area);
+		if (vmArea != NULL)
+			actualType = vmArea->MemoryType();
+	}
 	LAB_LOG("map 0x%" B_PRIx64 " size 0x%" B_PRIx64 ": area %" B_PRId32
-		" at 0x%lx, %" B_PRIu32 " range(s), caching %d\n", request->offset,
-		request->size, area, (addr_t)address, vecCount, caching);
+		" at 0x%lx, %" B_PRIu32 " range(s) from 0x%" B_PRIx64 ", caching %d, "
+		"memory type 0x%" B_PRIx32 "\n", request->offset, request->size, area,
+		(addr_t)address, vecCount, (uint64)firstBase, caching, actualType);
+#endif
 	request->area = area;
 	request->address = (addr_t)address;
 	return B_OK;
@@ -406,6 +422,9 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			return ENODEV;
 		info.minor = cookie->minor;
 		info.node_type = cookie->minor >= 128 ? 2 : 0;
+		// one cookie per open file: dup()ed descriptors share it
+		info.file_id[0] = (uint32)(addr_t)cookie;
+		info.file_id[1] = (uint32)((uint64)(addr_t)cookie >> 32);
 		info.bus = bus;
 		info.dev = device;
 		info.func = function;
@@ -437,6 +456,12 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 	if (op == kDrmHaikuLabUnpin) {
 		lab_unpin();
 		return B_OK;
+	}
+	if (op == kDrmHaikuLabBench)
+		return haiku_status(lx_glue_lab_bench(cookie->file));
+	if (op == kDrmHaikuLabPerfLevel) {
+		return haiku_status(lx_glue_lab_perf_level(cookie->file,
+			(unsigned int)(addr_t)buffer));
 	}
 #endif
 

@@ -119,6 +119,12 @@ lx_get_current(void)
 /* #pragma mark - sleeping and waking */
 
 
+/*	Bring-up aid: waits without a timeout that last longer than this many
+	seconds get the waiting thread's stack logged (0: off). */
+int hung_wait_s = 30;
+module_param(hung_wait_s, int, 0644);
+
+
 static long
 lx_schedule_us(long long timeout_us)
 {
@@ -126,11 +132,34 @@ lx_schedule_us(long long timeout_us)
 	struct lx_task_private *priv = task->lx_private;
 	long long start = lx_haiku_system_time();
 	long long remaining;
+	unsigned int state = READ_ONCE(task->__state);
+	int interrupt;
 
-	if (READ_ONCE(task->__state) == TASK_RUNNING)
+	if (state == TASK_RUNNING)
 		return 1;
 
-	lx_haiku_event_wait(priv->event, timeout_us);
+	/* a signal ends interruptible waits (the waiter checks signal_pending()) */
+	interrupt = (state & TASK_INTERRUPTIBLE) ? LX_HAIKU_WAIT_INTERRUPTIBLE
+		: (state & TASK_WAKEKILL) ? LX_HAIKU_WAIT_KILLABLE
+		: LX_HAIKU_WAIT_UNINTERRUPTIBLE;
+	if (timeout_us < 0 && hung_wait_s > 0 && !task->lx_idle) {
+		/* Linux's hung task detector, per wait: a wait that does not end
+		 * gets its stack logged once */
+		bool reported = false;
+		while (lx_haiku_event_wait_etc(priv->event,
+				(long long)hung_wait_s * 1000000, interrupt) == -ETIMEDOUT) {
+			if (!reported) {
+				char what[96];
+				snprintf(what, sizeof(what), "waiting for %d s (state %#x)",
+					hung_wait_s, state);
+				lx_haiku_log_stack(what);
+				reported = true;
+			}
+		}
+		if (reported)
+			pr_info("lx: thread %d: the wait ended\n", task->pid);
+	} else
+		lx_haiku_event_wait_etc(priv->event, timeout_us, interrupt);
 	WRITE_ONCE(task->__state, TASK_RUNNING);
 
 	if (timeout_us < 0)
@@ -427,7 +456,9 @@ kthread_parkme(void)
 			break;
 		if (!test_and_set_bit(KTHREAD_IS_PARKED, &kthread->flags))
 			complete(&kthread->parked);
+		current->lx_idle = 1;
 		schedule();
+		current->lx_idle = 0;
 	}
 	clear_bit(KTHREAD_IS_PARKED, &kthread->flags);
 	__set_current_state(TASK_RUNNING);
@@ -530,8 +561,11 @@ kthread_worker_main(void *data)
 			worker->current_work = NULL;
 			spin_unlock(&worker->lock);
 			wake_up_all(&worker->idle);
-		} else
+		} else {
+			current->lx_idle = 1;
 			schedule();
+			current->lx_idle = 0;
+		}
 	}
 	return 0;
 }

@@ -33,6 +33,7 @@
 #include <vm/vm_page.h>
 #include <vm/VMAddressSpace.h>
 #include <arch/x86/arch_cpu.h>
+#include <arch/debug.h>
 
 #include "../include/lx/haiku.h"
 
@@ -46,6 +47,7 @@ static const int kLinuxEFAULT = 14;
 static const int kLinuxENOENT = 2;
 static const int kLinuxEIO = 5;
 static const int kLinuxETIMEDOUT = 110;
+static const int kLinuxEINTR = 4;
 
 
 // #pragma mark - output, time, processors
@@ -258,6 +260,15 @@ lx_haiku_mutex_lock(void* storage)
 }
 
 
+/*	0 when locked, -ETIMEDOUT when the timeout passed first. */
+extern "C" int
+lx_haiku_mutex_lock_timeout(void* storage, long long timeout)
+{
+	return mutex_lock_with_timeout((mutex*)storage, B_RELATIVE_TIMEOUT,
+		timeout) == B_OK ? 0 : -kLinuxETIMEDOUT;
+}
+
+
 extern "C" int
 lx_haiku_mutex_trylock(void* storage)
 {
@@ -404,7 +415,18 @@ lx_haiku_event_signal(void* _event)
 extern "C" int
 lx_haiku_event_wait(void* _event, long long timeout)
 {
+	return lx_haiku_event_wait_etc(_event, timeout, LX_HAIKU_WAIT_UNINTERRUPTIBLE);
+}
+
+
+/*	Like lx_haiku_event_wait(); a wait that signals may interrupt returns
+	-EINTR when one does. */
+extern "C" int
+lx_haiku_event_wait_etc(void* _event, long long timeout, int interrupt)
+{
 	LinuxEvent* event = (LinuxEvent*)_event;
+	uint32 flags = interrupt == LX_HAIKU_WAIT_INTERRUPTIBLE ? B_CAN_INTERRUPT
+		: interrupt == LX_HAIKU_WAIT_KILLABLE ? B_KILL_CAN_INTERRUPT : 0;
 
 	InterruptsSpinLocker locker(event->lock);
 	if (event->signalled) {
@@ -418,17 +440,55 @@ lx_haiku_event_wait(void* _event, long long timeout)
 	event->condition.Add(&entry);
 	locker.Unlock();
 
+	status_t status;
 	if (timeout < 0)
-		entry.Wait();
+		status = entry.Wait(flags);
 	else
-		entry.Wait(B_RELATIVE_TIMEOUT, timeout);
+		status = entry.Wait(flags | B_RELATIVE_TIMEOUT, timeout);
 
 	locker.Lock();
 	if (event->signalled) {
 		event->signalled = false;
 		return 0;
 	}
-	return -kLinuxETIMEDOUT;
+	return status == B_INTERRUPTED ? -kLinuxEINTR : -kLinuxETIMEDOUT;
+}
+
+
+/*	Whether a signal is pending for the current thread that interrupts a
+	wait (any one, or only a kill when fatalOnly). Kernel threads have none. */
+extern "C" int
+lx_haiku_signal_pending(int fatalOnly)
+{
+	Thread* thread = thread_get_current_thread();
+	if (thread->team == team_get_kernel_team())
+		return 0;
+	return thread_is_interrupted(thread,
+		fatalOnly ? B_KILL_CAN_INTERRUPT : B_CAN_INTERRUPT) ? 1 : 0;
+}
+
+
+extern "C" void __cyg_profile_func_enter(void* function, void* site);
+
+
+/*	Logs the current thread's kernel stack, return addresses after a header
+	with the address of the trace anchor (see compat/src/trace.c), which
+	tools/symbolize-trace.sh turns into names. */
+extern "C" void
+lx_haiku_log_stack(const char* what)
+{
+	addr_t addresses[24];
+	int32 count = arch_get_stack_trace(addresses, 24, 0, 1, STACK_TRACE_KERNEL);
+	char line[192];
+	snprintf(line, sizeof(line), "stack of thread %" B_PRId32 " (%s), anchor "
+		"%#lx: %s\n", thread_get_current_thread_id(),
+		thread_get_current_thread()->name,
+		(addr_t)&__cyg_profile_func_enter, what);
+	lx_haiku_log(line);
+	for (int32 i = 0; i < count; i++) {
+		snprintf(line, sizeof(line), "  %#lx\n", addresses[i]);
+		lx_haiku_log(line);
+	}
 }
 
 

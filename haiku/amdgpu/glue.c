@@ -18,6 +18,10 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_vma_manager.h>
 
+#include "amdgpu.h"
+#include "amdgpu_dpm.h"
+#include "amdgpu_object.h"
+
 #include "glue.h"
 
 #ifndef DRM_MAJOR
@@ -40,6 +44,7 @@ void lx_module_exit_gpu_buddy_module_exit(void);
 void lx_module_exit_drm_core_exit(void);
 
 int lx_workqueue_init(void);
+void lx_cpu_init(void);
 void lx_workqueue_exit(void);
 void lx_rcu_exit(void);
 void lx_timer_exit(void);
@@ -84,9 +89,9 @@ lx_glue_set_param(const char *name, const char *value)
 		int error = -EINVAL;
 		if (strcmp(param->name, name) != 0)
 			continue;
-		if (!strcmp(param->type, "int") || !strcmp(param->type, "hexint"))
+		if (!strcmp(param->type, "int"))
 			error = kstrtoint(value, 0, param->value);
-		else if (!strcmp(param->type, "uint"))
+		else if (!strcmp(param->type, "uint") || !strcmp(param->type, "hexint"))
 			error = kstrtouint(value, 0, param->value);
 		else if (!strcmp(param->type, "long"))
 			error = kstrtol(value, 0, param->value);
@@ -120,6 +125,7 @@ lx_glue_init(void)
 {
 	int error;
 
+	lx_cpu_init();
 	error = lx_workqueue_init();
 	if (error != 0)
 		return error;
@@ -159,6 +165,99 @@ err_workqueues:
 }
 
 
+/*	Lab aid (settings: "lab_bar_bench 1"): the CPU's bandwidth to the VRAM
+	aperture before amdgpu touches the GPU, through write-combined and
+	uncached mappings of 4 MB at 128 MB into it, which nothing uses yet (the
+	firmware's frame buffer is at its start). */
+static int lab_bar_bench;
+module_param(lab_bar_bench, int, 0644);
+
+static void
+bar_bench(struct pci_dev *pdev, const char *what, bool wc)
+{
+	const unsigned long offset = 128 << 20, size = 4 << 20, readSize = 64 << 10;
+	resource_size_t base = pci_resource_start(pdev, 0);
+	volatile u64 *map;
+	ktime_t start, written, read;
+	u64 sum = 0;
+	unsigned long i;
+
+	if (pci_resource_len(pdev, 0) < offset + size)
+		return;
+	map = wc ? ioremap_wc(base + offset, size) : ioremap(base + offset, size);
+	if (map == NULL)
+		return;
+	start = ktime_get();
+	for (i = 0; i < size / 8; i++)
+		map[i] = i;
+	written = ktime_get();
+	for (i = 0; i < readSize / 8; i++)
+		sum += map[i];
+	read = ktime_get();
+	pr_info("lab bar bench %s: aperture %pa, %s: write %llu MB/s, read %llu "
+		"MB/s (%s)\n", what, &base, wc ? "write-combined" : "uncached",
+		(u64)size / max_t(s64, ktime_to_us(ktime_sub(written, start)), 1),
+		(u64)readSize / max_t(s64, ktime_to_us(ktime_sub(read, written)), 1),
+		sum == (u64)(readSize / 8) * (readSize / 8 - 1) / 2 ? "ok" : "WRONG");
+	iounmap((void __iomem *)map);
+}
+
+
+/*	The lab hook amdgpu_device.c calls after each step of the start: 4 KB
+	read from the aperture at 200 MB and 64 KB written back unchanged,
+	through a write-combined mapping (amdgpu maps the visible VRAM so: an
+	uncached mapping of part of it would conflict, a panic with KDEBUG). */
+void lx_lab_ip_hook(struct amdgpu_device *adev, const char *step);
+
+void
+lx_lab_ip_hook(struct amdgpu_device *adev, const char *step)
+{
+	const unsigned long offset = 200 << 20, size = 64 << 10, readSize = 4096;
+	resource_size_t base = pci_resource_start(adev->pdev, 0);
+	volatile u32 *map;
+	ktime_t start, read, written;
+	unsigned long i;
+	static u32 values[(64 << 10) / 4];
+
+	if (!lab_bar_bench || pci_resource_len(adev->pdev, 0) < offset + size)
+		return;
+	map = ioremap_wc(base + offset, size);
+	if (map == NULL)
+		return;
+	start = ktime_get();
+	for (i = 0; i < readSize / 4; i++)
+		values[i] = map[i];
+	read = ktime_get();
+	for (i = 0; i < size / 4; i++)
+		map[i] = values[i % (readSize / 4)] ^ values[i % (readSize / 4)] ^ map[i];
+	written = ktime_get();
+	iounmap((void __iomem *)map);
+	pr_info("lab aperture after %s: read %lld us (4 KB), read+write %lld us "
+		"(64 KB)\n", step, ktime_to_us(ktime_sub(read, start)),
+		ktime_to_us(ktime_sub(written, read)));
+	{
+		/* the PCIe link: ASPM control, speed and width, here and upstream */
+		struct pci_dev *dev = adev->pdev;
+		int level;
+		for (level = 0; dev != NULL && level < 3; level++,
+				dev = pci_upstream_bridge(dev)) {
+			u16 control = 0, status = 0;
+			u32 capability = 0;
+			pcie_capability_read_word(dev, PCI_EXP_LNKCTL, &control);
+			pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &status);
+			pcie_capability_read_dword(dev, PCI_EXP_LNKCAP, &capability);
+			pr_info("lab   %s %04x:%04x: link control %#x (ASPM %s%s), status "
+				"%#x (gen %u x%u), capability %#x\n", pci_name(dev),
+				dev->vendor, dev->device, control,
+				(control & PCI_EXP_LNKCTL_ASPM_L0S) ? "L0s " : "",
+				(control & PCI_EXP_LNKCTL_ASPM_L1) ? "L1" : "",
+				status, status & PCI_EXP_LNKSTA_CLS,
+				(status & PCI_EXP_LNKSTA_NLW) >> 4, capability);
+		}
+	}
+}
+
+
 int
 lx_glue_probe(int bus, int device, int function)
 {
@@ -178,6 +277,10 @@ lx_glue_probe(int bus, int device, int function)
 
 	pr_info("amdgpu: probing %s (%04x:%04x rev %02x)\n", pci_name(pdev),
 		pdev->vendor, pdev->device, pdev->revision);
+	if (lab_bar_bench) {
+		bar_bench(pdev, "before amdgpu", true);
+		bar_bench(pdev, "before amdgpu", false);
+	}
 	pdev->driver = driver;
 	error = driver->probe(pdev, id);
 	if (error != 0) {
@@ -188,6 +291,8 @@ lx_glue_probe(int bus, int device, int function)
 		return error;
 	}
 	probed[probed_count++] = pdev;
+	if (lab_bar_bench)
+		bar_bench(pdev, "after amdgpu", true);
 	return 0;
 }
 
@@ -336,6 +441,55 @@ lx_glue_ioctl(void *_file, unsigned int cmd, void *arg)
 	if (filp->f_op->unlocked_ioctl == NULL)
 		return -ENOTTY;
 	return filp->f_op->unlocked_ioctl(filp, cmd, (unsigned long)arg);
+}
+
+
+/*	Lab aid: forces a DPM performance level (AMD_DPM_FORCED_LEVEL_*), as
+	Linux's power_dpm_force_performance_level file does. */
+int
+lx_glue_lab_perf_level(void *_file, unsigned int level)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct amdgpu_device *adev = drm_to_adev(file->minor->dev);
+	int r = amdgpu_dpm_force_performance_level(adev, level);
+	pr_info("lab: performance level %#x: %d\n", level, r);
+	return r;
+}
+
+
+/*	Lab aid: the CPU's bandwidth to a VRAM buffer through the kernel's
+	mapping of it (amdgpu_bo_kmap(): write-combined). */
+int
+lx_glue_lab_bench(void *_file)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct amdgpu_device *adev = drm_to_adev(file->minor->dev);
+	const unsigned long size = 16 << 20, readSize = 256 << 10;
+	struct amdgpu_bo *bo = NULL;
+	u64 gpuAddress, sum = 0;
+	volatile u64 *cpu = NULL;
+	ktime_t start, written, read;
+	unsigned long i;
+	int r = amdgpu_bo_create_kernel(adev, size, PAGE_SIZE,
+		AMDGPU_GEM_DOMAIN_VRAM, &bo, &gpuAddress, (void **)&cpu);
+	if (r != 0)
+		return r;
+	start = ktime_get();
+	for (i = 0; i < size / 8; i++)
+		cpu[i] = i;
+	written = ktime_get();
+	for (i = 0; i < readSize / 8; i++)
+		sum += cpu[i];
+	read = ktime_get();
+	pr_info("lab bench: VRAM at %#llx, kernel mapping %px: write %llu MB/s, "
+		"read %llu MB/s (%s)\n", gpuAddress, cpu,
+		(u64)size * 1000 / max_t(s64, ktime_to_us(ktime_sub(written, start)), 1) / 1000,
+		(u64)readSize * 1000 / max_t(s64, ktime_to_us(ktime_sub(read, written)), 1) / 1000,
+		sum == (u64)(readSize / 8) * (readSize / 8 - 1) / 2 ? "ok" : "WRONG");
+	amdgpu_bo_free_kernel(&bo, &gpuAddress, (void **)&cpu);
+	return 0;
 }
 
 

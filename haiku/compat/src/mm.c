@@ -429,6 +429,45 @@ si_meminfo(struct sysinfo *info)
 
 struct cpuinfo_x86 boot_cpu_data;
 
+
+static void
+lx_cpuid(u32 leaf, u32 *a, u32 *b, u32 *c, u32 *d)
+{
+	__asm__ volatile("cpuid" : "=a" (*a), "=b" (*b), "=c" (*c), "=d" (*d)
+		: "a" (leaf), "c" (0));
+}
+
+
+/*	boot_cpu_data from CPUID: amdgpu decides by the vendor whether the host
+	takes part in PCIe link speed switching, and with a zeroed one (Intel)
+	it gets the platform's link capabilities wrong. */
+void lx_cpu_init(void);
+
+void
+lx_cpu_init(void)
+{
+	u32 a, b, c, d, family, model;
+	lx_cpuid(0, &a, &b, &c, &d);
+	if (b == 0x68747541 && d == 0x69746e65 && c == 0x444d4163)
+		boot_cpu_data.x86_vendor = X86_VENDOR_AMD;		/* AuthenticAMD */
+	else if (b == 0x6f677948 && d == 0x6e65476e && c == 0x656e6975)
+		boot_cpu_data.x86_vendor = X86_VENDOR_HYGON;	/* HygonGenuine */
+	else
+		boot_cpu_data.x86_vendor = X86_VENDOR_INTEL;
+	lx_cpuid(1, &a, &b, &c, &d);
+	family = (a >> 8) & 0xf;
+	model = (a >> 4) & 0xf;
+	if (family == 0xf)
+		family += (a >> 20) & 0xff;
+	if (family >= 6)
+		model |= ((a >> 16) & 0xf) << 4;
+	boot_cpu_data.x86 = family;
+	boot_cpu_data.x86_model = model;
+	boot_cpu_data.x86_stepping = a & 0xf;
+	boot_cpu_data.x86_clflush_size = ((b >> 8) & 0xff) * 8;
+	boot_cpu_data.x86_cache_alignment = boot_cpu_data.x86_clflush_size;
+}
+
 bool
 lx_cpu_has(int feature)
 {

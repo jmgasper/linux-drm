@@ -88,6 +88,15 @@
 #include <asm/cpu_device_id.h>
 #endif
 
+#ifdef __HAIKU_LINUX_COMPAT__
+/* Haiku lab aid (haiku/amdgpu/glue.c): measures the host's access to the
+ * VRAM aperture after each step of the start. */
+void lx_lab_ip_hook(struct amdgpu_device *adev, const char *step);
+#define LX_LAB_IP_HOOK(adev, step)	lx_lab_ip_hook(adev, step)
+#else
+#define LX_LAB_IP_HOOK(adev, step)	do { } while (0)
+#endif
+
 MODULE_FIRMWARE("amdgpu/vega10_gpu_info.bin");
 MODULE_FIRMWARE("amdgpu/vega12_gpu_info.bin");
 MODULE_FIRMWARE("amdgpu/raven_gpu_info.bin");
@@ -3027,6 +3036,7 @@ static int amdgpu_device_ip_hw_init_phase1(struct amdgpu_device *adev)
 				return r;
 			}
 			adev->ip_blocks[i].status.hw = true;
+			LX_LAB_IP_HOOK(adev, adev->ip_blocks[i].version->funcs->name);
 		}
 	}
 
@@ -3053,6 +3063,7 @@ static int amdgpu_device_ip_hw_init_phase2(struct amdgpu_device *adev)
 			return r;
 		}
 		adev->ip_blocks[i].status.hw = true;
+		LX_LAB_IP_HOOK(adev, adev->ip_blocks[i].version->funcs->name);
 	}
 
 	return 0;
@@ -3095,6 +3106,7 @@ static int amdgpu_device_fw_loading(struct amdgpu_device *adev)
 					return r;
 				}
 				adev->ip_blocks[i].status.hw = true;
+				LX_LAB_IP_HOOK(adev, adev->ip_blocks[i].version->funcs->name);
 			}
 			break;
 		}
@@ -3222,6 +3234,7 @@ static int amdgpu_device_ip_init(struct amdgpu_device *adev)
 				goto init_failed;
 			}
 			adev->ip_blocks[i].status.hw = true;
+			LX_LAB_IP_HOOK(adev, adev->ip_blocks[i].version->funcs->name);
 		} else if (adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_GMC) {
 			/* need to do gmc hw init early so we can allocate gpu mem */
 			/* Try to reserve bad pages early */
@@ -3248,6 +3261,7 @@ static int amdgpu_device_ip_init(struct amdgpu_device *adev)
 				goto init_failed;
 			}
 			adev->ip_blocks[i].status.hw = true;
+			LX_LAB_IP_HOOK(adev, adev->ip_blocks[i].version->funcs->name);
 
 			/* right after GMC hw init, we create CSA */
 			if (adev->gfx.mcbp) {
@@ -4703,7 +4717,9 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 	 */
 	amdgpu_set_init_level(adev, AMDGPU_INIT_LEVEL_DEFAULT);
 	/* early init functions */
+	LX_LAB_IP_HOOK(adev, "start");
 	r = amdgpu_device_ip_early_init(adev);
+	LX_LAB_IP_HOOK(adev, "after early_init");
 	if (r)
 		return r;
 
@@ -4811,6 +4827,7 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 		}
 		dev_info(adev->dev, "GPU posting now...\n");
 		r = amdgpu_device_asic_init(adev);
+		LX_LAB_IP_HOOK(adev, "after asic_init");
 		if (r) {
 			dev_err(adev->dev, "gpu post error!\n");
 			goto failed;
@@ -4852,6 +4869,7 @@ fence_driver_init:
 	drm_mode_config_init(adev_to_drm(adev));
 
 	r = amdgpu_device_ip_init(adev);
+	LX_LAB_IP_HOOK(adev, "after ip_init");
 	if (r) {
 		dev_err(adev->dev, "amdgpu_device_ip_init failed\n");
 		amdgpu_vf_error_put(adev, AMDGIM_ERROR_VF_AMDGPU_INIT_FAIL, 0, 0);
@@ -4891,6 +4909,7 @@ fence_driver_init:
 	 */
 	if (adev->init_lvl->level != AMDGPU_INIT_LEVEL_MINIMAL_XGMI) {
 		r = amdgpu_device_ip_late_init(adev);
+		LX_LAB_IP_HOOK(adev, "after late_init");
 		if (r) {
 			dev_err(adev->dev, "amdgpu_device_ip_late_init failed\n");
 			amdgpu_vf_error_put(adev, AMDGIM_ERROR_VF_AMDGPU_LATE_INIT_FAIL, 0, r);
