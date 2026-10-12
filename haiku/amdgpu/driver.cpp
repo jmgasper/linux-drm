@@ -10,7 +10,8 @@
 
 	Settings (~/config/settings/kernel/drivers/amdgpu_drm): one Linux
 	module parameter per line, "name value" (amdgpu's and drm's, e.g.
-	"dc 1" or "debug 0x6"). */
+	"dc 1" or "debug 0x6"). A running driver takes one with
+	DRM_HAIKU_IOCTL_SET_PARAM (tests/drmparam), where Linux reads it again. */
 
 #include <new>
 #include <stdio.h>
@@ -109,6 +110,18 @@ static const uint32 kDrmHaikuWaitHotplug = LX_IOC(3, 'd', 0xf3,
 	sizeof(drm_haiku_wait_hotplug));
 static const uint32 kDrmHaikuDeviceInfo = LX_IOC(2, 'd', 0xf2,
 	sizeof(drm_haiku_device_info));
+struct drm_haiku_force_connector {
+	uint32	connector_id;
+	uint32	force;		// 0 detect, 1 off, 2 on
+};
+static const uint32 kDrmHaikuForceConnector = LX_IOC(1, 'd', 0xf4,
+	sizeof(drm_haiku_force_connector));
+struct drm_haiku_set_param {
+	char	name[64];
+	char	value[64];
+};
+static const uint32 kDrmHaikuSetParam = LX_IOC(1, 'd', 0xf5,
+	sizeof(drm_haiku_set_param));
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -252,7 +265,9 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 				vecCount);
 		}
 	}
+#ifdef AMDGPU_DRM_ARMED_ONLY
 	phys_addr_t firstBase = vecs[0].base;
+#endif
 	delete[] vecs;
 	if (area < 0) {
 		lx_glue_unmap(mapping);
@@ -433,6 +448,32 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
 			return B_BAD_ADDRESS;
 		return haiku_status(error);
+	}
+
+	if (op == kDrmHaikuForceConnector) {
+		// monitors are the primary node's
+		if (cookie->minor >= 128)
+			return B_NOT_ALLOWED;
+		drm_haiku_force_connector request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return haiku_status(lx_glue_force_connector(cookie->file,
+			request.connector_id, request.force));
+	}
+
+	if (op == kDrmHaikuSetParam) {
+		// what writing /sys/module/<module>/parameters/<name> does: takes
+		// effect where the value is looked at again (drm's "debug" is)
+		if (cookie->minor >= 128)
+			return B_NOT_ALLOWED;
+		drm_haiku_set_param request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		request.name[sizeof(request.name) - 1] = '\0';
+		request.value[sizeof(request.value) - 1] = '\0';
+		return haiku_status(lx_glue_set_param(request.name, request.value));
 	}
 
 	if (op == kDrmHaikuDeviceInfo) {

@@ -25,6 +25,7 @@ void *lx_glue_open(int minor, int flags, int *error);
 void lx_glue_close(void *file);
 long lx_glue_ioctl(void *file, unsigned int cmd, void *arg);
 long lx_glue_read(void *file, void *buffer, unsigned long length);
+int lx_glue_force_connector(void *file, unsigned int connector_id, int force);
 void *lx_glue_select(void *file, void (*notify)(void *cookie, unsigned int events),
 	void *cookie, unsigned int *ready);
 void lx_glue_deselect(void *select);

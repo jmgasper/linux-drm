@@ -17,6 +17,9 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_vma_manager.h>
+#include <drm/drm_connector.h>
+#include <drm/drm_mode_object.h>
+#include <drm/drm_probe_helper.h>
 
 #include "amdgpu.h"
 #include "amdgpu_dpm.h"
@@ -531,6 +534,49 @@ lx_glue_wait_hotplug(unsigned int *generation, unsigned int timeout_ms)
 		msecs_to_jiffies(timeout_ms));
 	*generation = atomic_read(&hotplug_generation);
 	return r < 0 ? (int)r : 0;
+}
+
+
+/* What writing "off", "on" or "detect" to a connector's status in sysfs
+ * does on Linux: forces it disconnected or connected, or lets the hardware
+ * say again, and tells everyone that monitors changed. For trying out
+ * monitors coming and going without anybody at the machine.
+ * force: 0 detect, 1 off, 2 on. */
+int
+lx_glue_force_connector(void *_file, unsigned int connector_id, int force)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct drm_device *dev = file->minor->dev;
+	struct drm_connector *connector;
+	enum drm_connector_force old_force;
+	enum drm_connector_status old_status;
+	int changed;
+
+	if (force < 0 || force > 2)
+		return -EINVAL;
+	connector = drm_connector_lookup(dev, file, connector_id);
+	if (connector == NULL)
+		return -ENOENT;
+	mutex_lock(&dev->mode_config.mutex);
+	old_force = connector->force;
+	old_status = connector->status;
+	connector->force = force == 1 ? DRM_FORCE_OFF
+		: force == 2 ? DRM_FORCE_ON : DRM_FORCE_UNSPECIFIED;
+	if (old_force != connector->force || !connector->force) {
+		connector->funcs->fill_modes(connector, dev->mode_config.max_width,
+			dev->mode_config.max_height);
+	}
+	changed = connector->status != old_status;
+	mutex_unlock(&dev->mode_config.mutex);
+	pr_info("amdgpu_drm: connector %s forced %s: %s\n", connector->name,
+		force == 1 ? "off" : force == 2 ? "on" : "back to detection",
+		connector->status == connector_status_connected ? "connected"
+			: "disconnected");
+	drm_connector_put(connector);
+	if (changed)
+		drm_kms_helper_hotplug_event(dev);
+	return 0;
 }
 
 
