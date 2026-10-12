@@ -588,9 +588,20 @@ static bool amdgpu_bo_validate_size(struct amdgpu_device *adev,
 	return false;
 }
 
+#ifdef __HAIKU_LINUX_COMPAT__
+extern int lx_haiku_uswc;
+#endif
+
 bool amdgpu_bo_support_uswc(u64 bo_flags)
 {
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* Haiku: write-combined GTT, which the GPU accesses without snooping,
+	 * when the haiku_uswc parameter asks for it; the compat layer flushes
+	 * the pages from the caches where Linux changes their attributes. */
+	if (lx_haiku_uswc)
+		return true;
+#endif
 #ifdef CONFIG_X86_32
 	/* XXX: Write-combined CPU mappings of GTT seem broken on 32-bit
 	 * See https://bugs.freedesktop.org/show_bug.cgi?id=84627

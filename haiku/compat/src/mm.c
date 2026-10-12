@@ -377,6 +377,36 @@ free_pages_exact(void *virt, size_t size)
 }
 
 
+/* see set_pages_wc() */
+void
+lx_flush_virt_range(const void *address, unsigned long size)
+{
+	const char *line = (const char *)((unsigned long)address & ~63UL);
+	const char *end = (const char *)address + size;
+	for (; line < end; line += 64)
+		__asm__ __volatile__("clflush %0" : "+m" (*(volatile char *)line));
+	__asm__ __volatile__("mfence" ::: "memory");
+}
+
+
+void
+lx_flush_page_range(struct page *page, unsigned long count)
+{
+	unsigned long i;
+	for (i = 0; i < count; i++)
+		lx_flush_virt_range(page_address(page + i), PAGE_SIZE);
+}
+
+
+void
+lx_flush_page_array(struct page **pages, unsigned long count)
+{
+	unsigned long i;
+	for (i = 0; i < count; i++)
+		lx_flush_virt_range(page_address(pages[i]), PAGE_SIZE);
+}
+
+
 void *
 vmap(struct page **pages, unsigned int count, unsigned long flags,
 	pgprot_t prot)

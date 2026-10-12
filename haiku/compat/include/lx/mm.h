@@ -423,16 +423,26 @@ void si_meminfo(struct sysinfo *val);
 #define memzero_page(page, off, len) \
 	memset((char *)page_address(page) + (off), 0, (len))
 
-/* caching attributes of the kernel mapping: unchanged (see lx_pat_enabled) */
+/* Caching attributes of the kernel mapping: it stays write-back (Haiku's
+   physical map, see lx_pat_enabled). Pages made write-combined or uncached
+   for the GPU, which then reads and writes them without snooping, are
+   flushed from the processor caches instead, so that nothing written
+   through that mapping (clearing them) reaches the GPU late or is written
+   back over what the GPU wrote. */
+void lx_flush_virt_range(const void *address, unsigned long size);
+void lx_flush_page_range(struct page *page, unsigned long count);
+void lx_flush_page_array(struct page **pages, unsigned long count);
 #define set_pages_wb(page, n)			0
-#define set_pages_uc(page, n)			0
-#define set_pages_wc(page, n)			0
+#define set_pages_uc(page, n)			(lx_flush_page_range(page, n), 0)
+#define set_pages_wc(page, n)			(lx_flush_page_range(page, n), 0)
 #define set_pages_array_wb(pages, n)	0
-#define set_pages_array_wc(pages, n)	0
-#define set_pages_array_uc(pages, n)	0
+#define set_pages_array_wc(pages, n)	(lx_flush_page_array(pages, n), 0)
+#define set_pages_array_uc(pages, n)	(lx_flush_page_array(pages, n), 0)
 #define set_memory_wb(addr, n)			0
-#define set_memory_wc(addr, n)			0
-#define set_memory_uc(addr, n)			0
+#define set_memory_wc(addr, n) \
+	(lx_flush_virt_range((const void *)(addr), (n) * PAGE_SIZE), 0)
+#define set_memory_uc(addr, n) \
+	(lx_flush_virt_range((const void *)(addr), (n) * PAGE_SIZE), 0)
 #define set_memory_ro(addr, n)			0
 #define set_memory_rw(addr, n)			0
 #define set_memory_decrypted(addr, n)	0

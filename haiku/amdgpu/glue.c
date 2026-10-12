@@ -176,6 +176,16 @@ err_workqueues:
 static int lab_bar_bench;
 module_param(lab_bar_bench, int, 0644);
 
+/* Write-combined GTT (amdgpu_bo_support_uswc): the GPU then reads and
+ * writes system memory without snooping. Experimental, and NOT safe to turn
+ * on yet: user mappings of buffers in several physical ranges stay
+ * write-back (Haiku's vm_map_physical_memory_vecs() takes no memory type),
+ * so the processor would cache what the GPU accesses past its caches.
+ * Measured on the X399 (2026-10-13): GPU writes into system memory are no
+ * faster without snooping (1.55 GB/s either way). */
+int lx_haiku_uswc;
+module_param_named(haiku_uswc, lx_haiku_uswc, int, 0444);
+
 static void
 bar_bench(struct pci_dev *pdev, const char *what, bool wc)
 {

@@ -283,6 +283,11 @@ static void ttm_pool_type_give(struct ttm_pool_type *pt, struct page *p)
 		else
 			clear_page(page_address(p + i));
 	}
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* cleared through the kernel's write-back mapping (see set_pages_wc) */
+	if (pt->caching != ttm_cached)
+		lx_flush_page_range(p, num_pages);
+#endif
 
 	spin_lock(&pt->lock);
 	list_add(&p->lru, &pt->pages);

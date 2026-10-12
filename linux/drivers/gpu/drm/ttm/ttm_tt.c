@@ -496,6 +496,15 @@ static void ttm_kmap_iter_tt_map_local(struct ttm_kmap_iter *iter,
 static void ttm_kmap_iter_tt_unmap_local(struct ttm_kmap_iter *iter,
 					 struct iosys_map *map)
 {
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* kmap_local_page_prot() hands out the write-back kernel mapping
+	 * whatever the caching (see set_pages_wc) */
+	struct ttm_kmap_iter_tt *iter_tt =
+		container_of(iter, typeof(*iter_tt), base);
+
+	if (pgprot_val(iter_tt->prot) != pgprot_val(PAGE_KERNEL))
+		lx_flush_virt_range(map->vaddr, PAGE_SIZE);
+#endif
 	kunmap_local(map->vaddr);
 }
 
