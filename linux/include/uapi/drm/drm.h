@@ -6,6 +6,10 @@
  * Acknowledgments:
  * Dec 1999, Richard Henderson <rth@twiddle.net>, move to generic cmpxchg.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: Haiku's ioctl encoding. The changes are
+ * in the history of https://github.com/jmgasper/linux-drm
+ */
 
 /*
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.

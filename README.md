@@ -11,7 +11,8 @@ add-on for air/OS.
 - `haiku/amdgpu/` - the Haiku driver: PCI device, interrupts, `/dev/dri`
   nodes, memory mapping into teams.
 
-Licensing: the Linux files keep their own licences (most of DRM and amdgpu
-is MIT; dma-buf, parts of the DRM core and the copied Linux library code are
-GPL-2.0). The add-on built from them is therefore distributed under the
-GPL-2.0; the compat layer and the Haiku driver code are MIT.
+Licensing (details in COPYING): the Linux files keep their own licences
+(most of DRM and amdgpu is MIT; dma-buf, parts of the DRM core and the
+copied Linux library code are GPL-2.0). The add-on built from them is
+therefore distributed under the GPL-2.0; the compat layer and the Haiku
+driver code are MIT. No firmware is kept here.

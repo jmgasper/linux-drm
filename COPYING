@@ -1,0 +1,55 @@
+linux-drm for air/OS: licensing
+===============================
+
+This repository holds code under more than one licence.
+
+linux/
+    The sources of Linux 6.18.52 this port compiles, imported unchanged
+    (tools/import-linux.sh). The few files the port changed afterwards say so
+    after their licence block, and the changes are in the git history. Every
+    file keeps its own licence, named by its SPDX-License-Identifier line or
+    written out in its header: most of DRM and amdgpu is MIT, TTM is
+    GPL-2.0 OR MIT, and dma-buf, parts of the DRM core and the library code
+    are GPL-2.0. The licence texts are in linux/LICENSES; a file without a
+    licence statement is under the GPL-2.0, as linux/COPYING says.
+
+haiku/, tools/
+    The Linux kernel API on Haiku (haiku/compat), the Haiku driver
+    (haiku/amdgpu), tests and build and packaging tools, written for air/OS:
+    the MIT licence below, unless a file says otherwise
+    (haiku/compat/include/linux/string.h is GPL-2.0).
+
+The amdgpu_drm kernel add-on
+    Built from both, it is a combined work distributed under the GNU General
+    Public License, version 2 (linux/LICENSES/preferred/GPL-2.0). This
+    repository is its complete source; haiku/build/Makefile builds it.
+
+Firmware
+    This repository holds no firmware. The amdgpu_firmwares package that
+    haiku/tools/package.sh makes carries the amdgpu files of linux-firmware
+    unchanged, under their own licence (LICENSE.amdgpu, which the package
+    installs as "AMD GPU Firmware").
+
+
+The MIT licence (haiku/, tools/)
+--------------------------------
+
+Copyright 2026, air/OS.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -22,6 +22,11 @@
  *
  * Authors: Christian König
  */
+/*
+ * Changed for air/OS (Haiku), 2026: cache flushes for write-combined pages
+ * on Haiku. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 
 /* Pooling of allocated pages is necessary because changing the caching
  * attributes on x86 of the linear mapping requires a costly cross CPU TLB

@@ -25,6 +25,11 @@
  *          Alex Deucher
  *          Jerome Glisse
  */
+/*
+ * Changed for air/OS (Haiku), 2026: PCIe link speed, interruptible waits and
+ * lab diagnostics on Haiku. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 
 #include <linux/aperture.h>
 #include <linux/power_supply.h>

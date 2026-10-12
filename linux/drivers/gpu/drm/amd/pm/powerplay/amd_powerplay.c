@@ -20,6 +20,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  */
+/*
+ * Changed for air/OS (Haiku), 2026: keeps UVD/VCE power state for the smu7
+ * memory clock. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 #include "pp_debug.h"
 #include <linux/types.h>
 #include <linux/kernel.h>

@@ -4,6 +4,10 @@
  *
  * Scatterlist handling helpers.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: iov_iter extraction left out on Haiku.
+ * The changes are in the history of https://github.com/jmgasper/linux-drm
+ */
 #include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/scatterlist.h>

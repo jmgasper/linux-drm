@@ -9,6 +9,11 @@
  * better) at the expense of stack usage and much larger code to avoid
  * quicksort's O(n^2) worst case.
  */
+/*
+ * Changed for air/OS (Haiku), 2026: swap() call parenthesized for the Haiku
+ * compat headers. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 
 #include <linux/types.h>
 #include <linux/export.h>

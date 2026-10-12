@@ -24,6 +24,11 @@
  *
  */
 /*
+ * Changed for air/OS (Haiku), 2026: write-combined GTT support on Haiku
+ * (haiku_uswc). The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
+/*
  * Authors:
  *    Jerome Glisse <glisse@freedesktop.org>
  *    Thomas Hellstrom <thomas-at-tungstengraphics-dot-com>

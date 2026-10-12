@@ -1,4 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/*
+ * Changed for air/OS (Haiku), 2026: cache flushes for write-combined pages
+ * on Haiku. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 /**************************************************************************
  *
  * Copyright (c) 2006-2009 VMware, Inc., Palo Alto, CA., USA

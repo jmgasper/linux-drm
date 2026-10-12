@@ -1,6 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright 2026, air/OS. All rights reserved.
- * Distributed under the terms of the MIT License.
+ * Copyright 2026, air/OS.
+ *
+ * Linux's <linux/string.h> for the compat layer. Its declarations and a few
+ * of its small macros follow Linux's include/linux/string.h, which is under
+ * the GPL-2.0, and so is this file.
  */
 #ifndef _LINUX_STRING_H_
 #define _LINUX_STRING_H_

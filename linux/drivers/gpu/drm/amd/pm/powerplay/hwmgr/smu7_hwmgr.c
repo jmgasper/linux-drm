@@ -20,6 +20,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  */
+/*
+ * Changed for air/OS (Haiku), 2026: memory clock at its highest while UVD or
+ * VCE is powered. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 #include "pp_debug.h"
 #include <linux/delay.h>
 #include <linux/module.h>
