@@ -3,10 +3,13 @@
 # sources x399-gpu-userland.sh copied to $ROOT/src (libdrm, libglvnd, mesa)
 # into $ROOT/prefix.
 #
-#   gpu-userland-build.sh STAGE...    stages: libdrm glvnd mesa-configure mesa
+#   gpu-userland-build.sh STAGE...    stages: libdrm libva glvnd mesa-configure
+#                                     mesa
 #
 # Environment: GPU_ROOT (default /boot/home/gpu-userland), GPU_JOBS (16),
-# MESA_VULKAN_DRIVERS (default none; "amd" for RADV).
+# MESA_VULKAN_DRIVERS (default none; "amd" for RADV), GPU_PREFIX (default
+# $GPU_ROOT/prefix; /boot/system/non-packaged installs it for the system,
+# from build trees of its own).
 #
 # Everything that exchanges error numbers with libdrm is built with positive
 # POSIX errors (posix_error_mapper), as Linux code expects them.
@@ -14,15 +17,18 @@ set -euo pipefail
 
 ROOT=${GPU_ROOT:-/boot/home/gpu-userland}
 JOBS=${GPU_JOBS:-16}
-PREFIX=$ROOT/prefix
+PREFIX=${GPU_PREFIX:-$ROOT/prefix}
 SRC=$ROOT/src
 BUILD=$ROOT/build
+if [ "$PREFIX" != "$ROOT/prefix" ]; then
+	BUILD=$ROOT/build-$(echo "$PREFIX" | tr / _)
+fi
 # meson 1.8.4, mako and python 3.10 with pyyaml, from the Summit Mesa build
 PYTOOLS=${GPU_PYTOOLS:-/boot/home/summit-mesa/pytools}
 export PATH=$PYTOOLS/bin:$PATH
 export PYTHONPATH=$PYTOOLS/site
 export PYTHONDONTWRITEBYTECODE=1
-export PKG_CONFIG_PATH=$PREFIX/develop/lib/pkgconfig:$PREFIX/lib/pkgconfig
+export PKG_CONFIG_PATH=$PREFIX/develop/lib/pkgconfig:$PREFIX/lib/pkgconfig:$PREFIX/data/pkgconfig
 mkdir -p "$ROOT/tmp" "$BUILD"
 export TMPDIR=$ROOT/tmp
 # Haiku's runtime_loader implements only general-dynamic TLS.
@@ -42,6 +48,17 @@ stage_libdrm() {
 			-Dinstall-test-programs=false -Dtests=false
 	fi
 	ninja -C "$BUILD/libdrm" -j"$JOBS" install
+}
+
+stage_libva() {
+	if [ ! -f "$BUILD/libva/build.ninja" ]; then
+		meson setup "$BUILD/libva" "$SRC/libva" --prefix="$PREFIX" \
+			--libdir=lib --datadir=data --includedir=develop/headers \
+			--buildtype=release "-Dc_args=$POSITIVE" -Dc_link_args=$MAPPER \
+			-Ddisable_drm=false -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no \
+			-Dwith_win32=no
+	fi
+	ninja -C "$BUILD/libva" -j"$JOBS" install
 }
 
 stage_glvnd() {
