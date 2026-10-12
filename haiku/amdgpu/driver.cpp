@@ -89,7 +89,7 @@ struct drm_haiku_device_info {
 	uint32	reserved[4];
 };
 #ifdef AMDGPU_DRM_ARMED_ONLY
-// lab builds: closes the driver's own /dev/dri/card0, so that devfs can unload
+// lab builds: closes the driver's own device file, so that devfs can unload
 // it (to test the teardown: then touch the binary)
 static const uint32 kDrmHaikuLabUnpin = LX_IOC(0, 'd', 0xff, 0);
 static void lab_unpin();
@@ -712,9 +712,11 @@ static status_t
 pin_thread(void*)
 {
 	snooze(200000);
-	int fd = _kern_open(-1, "/dev/dri/card0", O_RDWR, 0);
+	// the render node: the first opener of card0 becomes DRM master, which
+	// is for app_server's accelerant to be
+	int fd = _kern_open(-1, "/dev/dri/renderD128", O_RDWR, 0);
 	if (fd < 0)
-		TRACE("could not keep /dev/dri/card0 open: %s\n", strerror(fd));
+		TRACE("could not keep /dev/dri/renderD128 open: %s\n", strerror(fd));
 	else
 		sPinFile = fd;
 	return B_OK;
