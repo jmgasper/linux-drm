@@ -10,8 +10,12 @@
 #include <linux/highmem.h>
 #include <linux/kmemleak.h>
 #include <linux/bvec.h>
+#ifndef __HAIKU_LINUX_COMPAT__
 #include <linux/uio.h>
+#endif
+#ifndef __HAIKU_LINUX_COMPAT__
 #include <linux/folio_queue.h>
+#endif
 
 /**
  * sg_nents - return total count of entries in scatterlist
@@ -1082,6 +1086,7 @@ size_t sg_zero_buffer(struct scatterlist *sgl, unsigned int nents,
 }
 EXPORT_SYMBOL(sg_zero_buffer);
 
+#ifndef __HAIKU_LINUX_COMPAT__ /* no iov_iter on Haiku */
 /*
  * Extract and pin a list of up to sg_max pages from UBUF- or IOVEC-class
  * iterators, and add them to the scatterlist.
@@ -1412,3 +1417,4 @@ ssize_t extract_iter_to_sg(struct iov_iter *iter, size_t maxsize,
 	}
 }
 EXPORT_SYMBOL_GPL(extract_iter_to_sg);
+#endif /* __HAIKU_LINUX_COMPAT__ */

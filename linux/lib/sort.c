@@ -137,7 +137,7 @@ struct wrapper {
 static void do_swap(void *a, void *b, size_t size, swap_r_func_t swap_func, const void *priv)
 {
 	if (swap_func == SWAP_WRAPPER) {
-		((const struct wrapper *)priv)->swap(a, b, (int)size);
+		(((const struct wrapper *)priv)->swap)(a, b, (int)size);
 		return;
 	}
 
