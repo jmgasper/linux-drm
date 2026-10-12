@@ -27,8 +27,10 @@ SETTINGS=/boot/home/config/settings/kernel/drivers
 BIN=$ROOT/out-release/amdgpu_drm
 ACCELERANT=${1:-/boot/home/gpu-userland/src/haiku-accel/out/amdgpu_kms.accelerant}
 
-strings "$BIN" | grep -q amdgpu_drm.starting || {
-	echo "$BIN is not a release build" >&2; exit 1; }
+if ! grep -aq amdgpu_drm.starting "$BIN" || grep -aq amdgpu_drm.arm "$BIN"; then
+	echo "$BIN is not a release build" >&2
+	exit 1
+fi
 
 $SSH "rm -f $SETTINGS/amdgpu_drm.arm; sync"
 if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
