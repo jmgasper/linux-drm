@@ -24,7 +24,7 @@ sync_tree() {
 
 if [ "${1:-}" = sync ]; then
 	shift
-	for name in libdrm libva libglvnd mesa; do
+	for name in libdrm libva libglvnd mesa ffmpeg; do
 		echo "sync $name"
 		sync_tree "$name"
 	done

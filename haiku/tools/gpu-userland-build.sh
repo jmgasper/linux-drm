@@ -4,10 +4,11 @@
 # into $ROOT/prefix.
 #
 #   gpu-userland-build.sh STAGE...    stages: libdrm libva glvnd mesa-configure
-#                                     mesa
+#                                     mesa ffmpeg
 #
 # Environment: GPU_ROOT (default /boot/home/gpu-userland), GPU_JOBS (16),
-# MESA_VULKAN_DRIVERS (default none; "amd" for RADV), GPU_PREFIX (default
+# MESA_VULKAN_DRIVERS (default none; "amd" for RADV), MESA_GALLIUM_VA
+# (default disabled; "enabled" builds radeonsi_drv_video), GPU_PREFIX (default
 # $GPU_ROOT/prefix; /boot/system/non-packaged installs it for the system,
 # from build trees of its own).
 #
@@ -83,7 +84,8 @@ stage_mesa_configure() {
 		-Dgallium-drivers=radeonsi,llvmpipe,softpipe \
 		"-Dvulkan-drivers=${MESA_VULKAN_DRIVERS:-}" \
 		-Damd-use-llvm=false -Dllvm=enabled -Dshared-llvm=enabled \
-		-Dgallium-va=disabled -Dgallium-rusticl=false \
+		"-Dgallium-va=${MESA_GALLIUM_VA:-disabled}" '-Dvideo-codecs=all' \
+		-Dgallium-rusticl=false \
 		-Dshader-cache=enabled -Dxmlconfig=disabled -Dexpat=disabled \
 		-Dzstd=disabled -Dzlib=enabled -Dvalgrind=disabled \
 		-Dlibunwind=disabled -Dlmsensors=disabled -Dspirv-tools=disabled \
@@ -97,6 +99,22 @@ stage_mesa() {
 	mkdir -p "$PREFIX/add-ons/opengl/egl_vendor.d"
 	cp -f "$PREFIX/data/glvnd/egl_vendor.d/50_mesa.json" \
 		"$PREFIX/add-ons/opengl/egl_vendor.d/"
+}
+
+# libavcodec with VA-API, static, for the amdgpu_va media add-on (H.264 and
+# HEVC decoders only): from src/ffmpeg (the air/OS fork) into $ROOT/ffmpeg-va
+stage_ffmpeg() {
+	rm -rf "$BUILD/ffmpeg-va"
+	mkdir -p "$BUILD/ffmpeg-va"
+	(cd "$BUILD/ffmpeg-va" && "$SRC/ffmpeg/configure" \
+		--prefix="$ROOT/ffmpeg-va" --enable-static --disable-shared \
+		--enable-pic --disable-programs --disable-doc --disable-avdevice \
+		--disable-avformat --disable-avfilter --disable-swresample \
+		--disable-swscale --disable-network --disable-autodetect \
+		--disable-everything --enable-decoder=h264,hevc \
+		--enable-parser=h264,hevc --enable-hwaccel=h264_vaapi,hevc_vaapi \
+		--enable-vaapi \
+		&& make -j"$JOBS" && make install)
 }
 
 for stage in "$@"; do
