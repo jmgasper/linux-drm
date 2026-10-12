@@ -20,6 +20,10 @@ typedef __INT32_TYPE__ lx_thread_id;
 void lx_haiku_log(const char *text);
 /* bring-up: also append every message to a file, synced per message */
 int lx_haiku_log_file(const char *path);
+/* the kernel debugger's on-screen console (frame_buffer_update()): a frame
+ * buffer of 32-bit pixels in kernel memory, NULL for none */
+void lx_haiku_debug_console(void *base, int width, int height,
+	int bytes_per_row);
 void lx_haiku_panic(const char *text) __attribute__((noreturn));
 void lx_haiku_dump_stack(void);
 

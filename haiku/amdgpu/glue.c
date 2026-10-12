@@ -20,6 +20,10 @@
 #include <drm/drm_connector.h>
 #include <drm/drm_mode_object.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_modeset_lock.h>
+#include <drm/drm_plane.h>
 
 #include "amdgpu.h"
 #include "amdgpu_dpm.h"
@@ -87,6 +91,12 @@ drm_devices(struct drm_device **devices, int max)
 /* #pragma mark - parameters */
 
 
+static int haiku_console_test;
+static void lx_glue_console_test(void);
+/* the kernel debugger's console, see lx_glue_update_debug_console() */
+static void *console_base;
+static int console_width, console_height, console_pitch;
+
 int
 lx_glue_set_param(const char *name, const char *value)
 {
@@ -116,6 +126,9 @@ lx_glue_set_param(const char *name, const char *value)
 		}
 		pr_info("amdgpu: parameter %s = %s%s\n", name, value,
 			error != 0 ? " (not accepted)" : "");
+		if (error == 0 && strcmp(name, "haiku_console_test") == 0
+			&& haiku_console_test)
+			lx_glue_console_test();
 		return error;
 	}
 	pr_info("amdgpu: no parameter %s\n", name);
@@ -319,6 +332,11 @@ void lx_glue_fake_device_stop(void);
 void
 lx_glue_uninit(void)
 {
+	/* amdgpu's mapping of the VRAM goes away */
+	if (console_base != NULL) {
+		lx_haiku_debug_console(NULL, 0, 0, 0);
+		console_base = NULL;
+	}
 	lx_glue_fake_device_stop();
 	while (probed_count > 0) {
 		struct pci_dev *pdev = probed[--probed_count];
@@ -451,13 +469,122 @@ lx_glue_close(void *file)
 }
 
 
+/* #pragma mark - the kernel debugger's console */
+
+/* Haiku draws the kernel debugger into the frame buffer the boot loader
+ * found (the firmware's), which the display engine no longer shows once a
+ * mode is set; app_server reports its own mapping of the new one, a user
+ * address the kernel turns down. So after every mode set, the part of a frame
+ * buffer the screen at the desktop's top left shows becomes the console,
+ * through amdgpu's kernel mapping of the visible VRAM. */
+/* lab aid: "haiku_console_test 1" (drmparam) paints a mark where the
+ * console is, to check that it is on screen */
+static int haiku_console_test;
+module_param(haiku_console_test, int, 0644);
+
+static void
+lx_glue_update_debug_console(struct drm_device *dev)
+{
+	struct amdgpu_device *adev = drm_to_adev(dev);
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_plane *plane;
+	void *base = NULL;
+	int width = 0, height = 0, pitch = 0, best = INT_MAX;
+	int ret;
+
+	if (adev->mman.aper_base_kaddr == NULL)
+		return;
+	drm_modeset_acquire_init(&ctx, 0);
+retry:
+	ret = drm_modeset_lock_all_ctx(dev, &ctx);
+	if (ret == -EDEADLK) {
+		drm_modeset_backoff(&ctx);
+		goto retry;
+	}
+	if (ret == 0) {
+		drm_for_each_plane(plane, dev) {
+			struct drm_plane_state *state = plane->state;
+			struct drm_framebuffer *fb;
+			struct amdgpu_bo *abo;
+			u64 offset;
+			int x, y, w, h, distance;
+
+			if (plane->type != DRM_PLANE_TYPE_PRIMARY || state == NULL
+				|| state->fb == NULL || state->crtc == NULL
+				|| !state->crtc->state->active)
+				continue;
+			fb = state->fb;
+			if (fb->format->cpp[0] != 4 || fb->obj[0] == NULL)
+				continue;
+			abo = gem_to_amdgpu_bo(fb->obj[0]);
+			if (abo->tbo.pin_count == 0 || abo->tbo.resource == NULL
+				|| abo->tbo.resource->mem_type != TTM_PL_VRAM)
+				continue;
+			x = state->src_x >> 16;
+			y = state->src_y >> 16;
+			w = state->src_w >> 16;
+			h = state->src_h >> 16;
+			offset = amdgpu_bo_gpu_offset(abo) - adev->gmc.vram_start
+				+ fb->offsets[0] + (u64)y * fb->pitches[0] + (u64)x * 4;
+			if (w <= 0 || h <= 0 || offset + (u64)(h - 1) * fb->pitches[0]
+					+ (u64)w * 4 > adev->gmc.visible_vram_size)
+				continue;
+			distance = x + y;
+			if (distance >= best)
+				continue;
+			best = distance;
+			base = (u8 *)adev->mman.aper_base_kaddr + offset;
+			width = w;
+			height = h;
+			pitch = fb->pitches[0];
+		}
+		if (base != console_base || width != console_width
+			|| height != console_height || pitch != console_pitch) {
+			console_base = base;
+			console_width = width;
+			console_height = height;
+			console_pitch = pitch;
+			lx_haiku_debug_console(base, width, height, pitch);
+			pr_info("amdgpu_drm: kernel debugger console %dx%d\n", width,
+				height);
+		}
+	}
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
+}
+
+
+static void
+lx_glue_console_test(void)
+{
+	u8 *row = console_base;
+	int x, y;
+
+	if (row == NULL || console_width < 512 || console_height < 64)
+		return;
+	for (y = 0; y < 64; y++, row += console_pitch) {
+		u32 *pixel = (u32 *)row;
+		for (x = 0; x < 512; x++)
+			pixel[x] = ((x / 32 + y / 32) & 1) ? 0xffff00ff : 0xff00ffff;
+	}
+	pr_info("amdgpu_drm: marked the kernel debugger console\n");
+}
+
+
 long
 lx_glue_ioctl(void *_file, unsigned int cmd, void *arg)
 {
 	struct file *filp = _file;
+	long result;
 	if (filp->f_op->unlocked_ioctl == NULL)
 		return -ENOTTY;
-	return filp->f_op->unlocked_ioctl(filp, cmd, (unsigned long)arg);
+	result = filp->f_op->unlocked_ioctl(filp, cmd, (unsigned long)arg);
+	if (result == 0 && (cmd == DRM_IOCTL_MODE_ATOMIC
+			|| cmd == DRM_IOCTL_MODE_SETCRTC)) {
+		struct drm_file *file = filp->private_data;
+		lx_glue_update_debug_console(file->minor->dev);
+	}
+	return result;
 }
 
 

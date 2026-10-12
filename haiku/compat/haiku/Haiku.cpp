@@ -17,6 +17,7 @@
 #include <condition_variable.h>
 #include <cpu.h>
 #include <debug.h>
+#include <frame_buffer_console.h>
 #include <kernel.h>
 #include <lock.h>
 #include <Notifications.h>
@@ -347,6 +348,16 @@ extern "C" void
 lx_haiku_rwlock_write_unlock(void* storage)
 {
 	rw_lock_write_unlock((rw_lock*)storage);
+}
+
+
+extern "C" void
+lx_haiku_debug_console(void* base, int width, int height, int bytesPerRow)
+{
+	if (base == NULL)
+		frame_buffer_update(0, 0, 0, 32, 0);
+	else
+		frame_buffer_update((addr_t)base, width, height, 32, bytesPerRow);
 }
 
 
