@@ -527,10 +527,27 @@ kasprintf(unsigned int gfp, const char *fmt, ...)
 
 /* #pragma mark - printk */
 
+/*	Bring-up aid: sleep this long after every message, so that the syslog
+	daemon has written the messages before a step that may stop the machine
+	(settings: "printk_delay_us 20000"). */
+static int printk_delay_us;
+module_param(printk_delay_us, int, 0644);
+
+/*	Bring-up aid: also append every message to this file and sync it, so the
+	messages before a crash survive the power cycle (settings:
+	"log_file /boot/home/amdgpu_drm.log"). */
+static char *log_file;
+module_param(log_file, charp, 0444);
+
 
 int
 vprintk(const char *fmt, va_list args)
 {
+	static char *opened;
+	if (unlikely(log_file != opened)) {
+		opened = log_file;
+		lx_haiku_log_file(log_file);
+	}
 	char buffer[1024];
 	const char *text = buffer;
 	int length = vsnprintf(buffer, sizeof(buffer), fmt, args);
@@ -539,6 +556,8 @@ vprintk(const char *fmt, va_list args)
 		text += 2;
 	if (*text != '\0')
 		lx_haiku_log(text);
+	if (printk_delay_us > 0)
+		lx_haiku_snooze(printk_delay_us);
 	return length;
 }
 

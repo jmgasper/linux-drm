@@ -1,0 +1,631 @@
+/*
+ * Copyright 2026, air/OS. All rights reserved.
+ * Distributed under the terms of the MIT License.
+ */
+
+/*	The Haiku driver around Linux's amdgpu: finds AMD GPUs on PCI, starts
+	the DRM core and amdgpu (glue.c), publishes /dev/dri/cardN and
+	/dev/dri/renderDN, and forwards open, ioctl, read and select to the DRM
+	core. Buffer objects are mapped into teams by DRM_HAIKU_IOCTL_MAP.
+
+	Settings (~/config/settings/kernel/drivers/amdgpu_drm): one Linux
+	module parameter per line, "name value" (amdgpu's and drm's, e.g.
+	"dc 1" or "debug 0x6"). */
+
+#include <new>
+#include <stdio.h>
+#include <string.h>
+
+#include <driver_settings.h>
+#include <Drivers.h>
+#include <KernelExport.h>
+#include <PCI.h>
+#include <OS.h>
+#include <SupportDefs.h>
+#include <errno.h>
+
+#include <lock.h>
+#include <team.h>
+#include <util/AutoLock.h>
+#include <util/DoublyLinkedList.h>
+#include <vm/vm.h>
+#include <vm/VMAddressSpace.h>
+#include <sys/uio.h>
+#include <util/iovec_support.h>
+
+#include <syscalls.h>
+
+#include "glue.h"
+
+
+#define DRIVER_NAME "amdgpu_drm"
+#define TRACE(x...) dprintf(DRIVER_NAME ": " x)
+
+// Linux's DRM ioctl numbers (asm-generic/ioctl.h) for the Haiku additions
+#define LX_IOC(dir, type, nr, size) \
+	(((uint32)(dir) << 30) | ((uint32)(size) << 16) | ((type) << 8) | (nr))
+struct drm_haiku_map {
+	uint64	offset;
+	uint64	size;
+	uint32	flags;
+	int32	area;
+	uint64	address;
+};
+struct drm_haiku_unmap {
+	uint64	address;
+};
+static const uint32 kDrmHaikuMap = LX_IOC(3, 'd', 0xf0,
+	sizeof(drm_haiku_map));
+static const uint32 kDrmHaikuUnmap = LX_IOC(1, 'd', 0xf1,
+	sizeof(drm_haiku_unmap));
+
+
+int32 api_version = B_CUR_DRIVER_API_VERSION;
+
+static const int kMaxDevices = 16;
+static char* sDeviceNames[kMaxDevices + 1];
+static int sDeviceMinors[kMaxDevices];
+static int sDeviceCount;
+static bool sStarted;
+
+
+// #pragma mark - errors
+
+
+static status_t
+haiku_status(long linuxError)
+{
+	if (linuxError >= 0)
+		return B_OK;
+	switch (-linuxError) {
+		case 1: return B_NOT_ALLOWED;			// EPERM
+		case 2: return B_ENTRY_NOT_FOUND;		// ENOENT
+		case 4: return B_INTERRUPTED;			// EINTR
+		case 5: return B_IO_ERROR;				// EIO
+		case 6: return ENXIO;
+		case 7: return E2BIG;
+		case 9: return B_FILE_ERROR;			// EBADF
+		case 11: return B_WOULD_BLOCK;			// EAGAIN
+		case 12: return B_NO_MEMORY;			// ENOMEM
+		case 13: return B_PERMISSION_DENIED;	// EACCES
+		case 14: return B_BAD_ADDRESS;			// EFAULT
+		case 16: return B_BUSY;					// EBUSY
+		case 17: return B_FILE_EXISTS;			// EEXIST
+		case 19: return ENODEV;
+		case 22: return B_BAD_VALUE;			// EINVAL
+		case 24: return EMFILE;
+		case 25: return ENOTTY;
+		case 28: return B_DEVICE_FULL;			// ENOSPC
+		case 34: return ERANGE;
+		case 35: return EDEADLK;
+		case 38: return ENOSYS;
+		case 61: return ENODATA;
+		case 62: return ETIME;
+		case 71: return EPROTO;
+		case 75: return EOVERFLOW;
+		case 95: return EOPNOTSUPP;
+		case 110: return B_TIMED_OUT;			// ETIMEDOUT
+		case 114: return EALREADY;
+		case 125: return ECANCELED;
+		case 512: return B_INTERRUPTED;			// ERESTARTSYS
+		case 524: return B_NOT_SUPPORTED;		// ENOTSUPP
+	}
+	return B_ERROR;
+}
+
+
+// #pragma mark - buffer mappings
+
+
+struct BufferMapping : DoublyLinkedListLinkImpl<BufferMapping> {
+	team_id		team;
+	area_id		area;
+	addr_t		address;
+	void*		glueMapping;
+};
+
+typedef DoublyLinkedList<BufferMapping> MappingList;
+
+
+struct SelectState : DoublyLinkedListLinkImpl<SelectState> {
+	selectsync*	sync;
+	uint8		event;
+	void*		glueSelect;
+};
+
+typedef DoublyLinkedList<SelectState> SelectList;
+
+
+struct DeviceCookie {
+	void*		file;
+	int			minor;
+	mutex		lock;
+	MappingList	mappings;
+	SelectList	selects;
+};
+
+
+static status_t
+map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
+{
+	unsigned long* pfns;
+	int caching;
+	void* mapping = lx_glue_map(cookie->file, request->offset, request->size,
+		(request->flags & 1) != 0, &pfns, &caching);
+	if (int error = lx_glue_is_error(mapping))
+		return haiku_status(error);
+
+	uint32 count = request->size / B_PAGE_SIZE;
+	generic_io_vec* vecs = new(std::nothrow) generic_io_vec[count];
+	if (vecs == NULL) {
+		lx_glue_unmap(mapping);
+		return B_NO_MEMORY;
+	}
+	// merge physically contiguous pages
+	uint32 vecCount = 0;
+	for (uint32 i = 0; i < count; i++) {
+		phys_addr_t physical = (phys_addr_t)pfns[i] * B_PAGE_SIZE;
+		if (vecCount > 0 && vecs[vecCount - 1].base
+				+ vecs[vecCount - 1].length == physical) {
+			vecs[vecCount - 1].length += B_PAGE_SIZE;
+			continue;
+		}
+		vecs[vecCount].base = physical;
+		vecs[vecCount].length = B_PAGE_SIZE;
+		vecCount++;
+	}
+
+	uint32 memoryType = caching == 1 ? B_WRITE_COMBINING_MEMORY
+		: caching == 0 ? B_UNCACHED_MEMORY : B_WRITE_BACK_MEMORY;
+	uint32 protection = B_READ_AREA | ((request->flags & 1) ? B_WRITE_AREA : 0);
+	void* address = (void*)(addr_t)request->address;
+	addr_t size = request->size;
+	uint32 addressSpec = address != NULL ? B_EXACT_ADDRESS : B_ANY_ADDRESS;
+	area_id area;
+	if (vecCount == 1) {
+		area = vm_map_physical_memory(team_get_current_team_id(),
+			"drm buffer", &address, addressSpec | memoryType, size, protection,
+			vecs[0].base, false);
+	} else {
+		area = vm_map_physical_memory_vecs(team_get_current_team_id(),
+			"drm buffer", &address, addressSpec | memoryType, &size,
+			protection, vecs, vecCount);
+		if (area == B_NOT_SUPPORTED) {
+			// older kernels: the default memory type; for PCI apertures the
+			// firmware's MTRRs still make that uncached
+			address = (void*)(addr_t)request->address;
+			size = request->size;
+			area = vm_map_physical_memory_vecs(team_get_current_team_id(),
+				"drm buffer", &address, addressSpec, &size, protection, vecs,
+				vecCount);
+		}
+	}
+	delete[] vecs;
+	if (area < 0) {
+		lx_glue_unmap(mapping);
+		return area;
+	}
+
+	BufferMapping* record = new(std::nothrow) BufferMapping;
+	if (record == NULL) {
+		delete_area(area);
+		lx_glue_unmap(mapping);
+		return B_NO_MEMORY;
+	}
+	record->team = team_get_current_team_id();
+	record->area = area;
+	record->address = (addr_t)address;
+	record->glueMapping = mapping;
+	{
+		MutexLocker locker(cookie->lock);
+		cookie->mappings.Add(record);
+	}
+
+	request->area = area;
+	request->address = (addr_t)address;
+	return B_OK;
+}
+
+
+static status_t
+unmap_buffer(DeviceCookie* cookie, addr_t address)
+{
+	MutexLocker locker(cookie->lock);
+	team_id team = team_get_current_team_id();
+	for (MappingList::Iterator it = cookie->mappings.GetIterator();
+			BufferMapping* record = it.Next();) {
+		if (record->team != team || record->address != address)
+			continue;
+		it.Remove();
+		locker.Unlock();
+		// the team may have deleted the area itself already
+		area_info info;
+		if (get_area_info(record->area, &info) == B_OK
+			&& info.team == team && (addr_t)info.address == address)
+			vm_delete_area(team, record->area, true);
+		lx_glue_unmap(record->glueMapping);
+		delete record;
+		return B_OK;
+	}
+	return B_BAD_VALUE;
+}
+
+
+static void
+unmap_all(DeviceCookie* cookie)
+{
+	MutexLocker locker(cookie->lock);
+	while (BufferMapping* record = cookie->mappings.RemoveHead()) {
+		area_info info;
+		if (get_area_info(record->area, &info) == B_OK
+			&& info.team == record->team
+			&& (addr_t)info.address == record->address)
+			vm_delete_area(record->team, record->area, true);
+		lx_glue_unmap(record->glueMapping);
+		delete record;
+	}
+}
+
+
+// #pragma mark - device hooks
+
+
+static int
+minor_of(const char* name)
+{
+	for (int i = 0; i < sDeviceCount; i++) {
+		if (strcmp(sDeviceNames[i], name) == 0)
+			return sDeviceMinors[i];
+	}
+	return -1;
+}
+
+
+static status_t
+device_open(const char* name, uint32 flags, void** _cookie)
+{
+	int minor = minor_of(name);
+	if (minor < 0)
+		return B_ENTRY_NOT_FOUND;
+
+	DeviceCookie* cookie = new(std::nothrow) DeviceCookie;
+	if (cookie == NULL)
+		return B_NO_MEMORY;
+	mutex_init(&cookie->lock, "amdgpu file");
+	cookie->minor = minor;
+
+	int error;
+	cookie->file = lx_glue_open(minor, flags & O_ACCMODE, &error);
+	if (cookie->file == NULL) {
+		mutex_destroy(&cookie->lock);
+		delete cookie;
+		return haiku_status(error);
+	}
+	*_cookie = cookie;
+	return B_OK;
+}
+
+
+static status_t
+device_close(void* _cookie)
+{
+	return B_OK;
+}
+
+
+static status_t
+device_free(void* _cookie)
+{
+	DeviceCookie* cookie = (DeviceCookie*)_cookie;
+	unmap_all(cookie);
+	lx_glue_close(cookie->file);
+	mutex_destroy(&cookie->lock);
+	delete cookie;
+	return B_OK;
+}
+
+
+static status_t
+device_control(void* _cookie, uint32 op, void* buffer, size_t length)
+{
+	DeviceCookie* cookie = (DeviceCookie*)_cookie;
+
+	if (op == kDrmHaikuMap) {
+		drm_haiku_map request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		status_t status = map_buffer(cookie, &request);
+		if (status != B_OK)
+			return status;
+		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
+	}
+	if (op == kDrmHaikuUnmap) {
+		drm_haiku_unmap request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return unmap_buffer(cookie, request.address);
+	}
+
+	// everything of type 'd' is a DRM ioctl
+	if (((op >> 8) & 0xff) == 'd')
+		return haiku_status(lx_glue_ioctl(cookie->file, op, buffer));
+
+	return B_DEV_INVALID_IOCTL;
+}
+
+
+static status_t
+device_read(void* _cookie, off_t position, void* buffer, size_t* _length)
+{
+	DeviceCookie* cookie = (DeviceCookie*)_cookie;
+	long result = lx_glue_read(cookie->file, buffer, *_length);
+	if (result < 0) {
+		*_length = 0;
+		return haiku_status(result);
+	}
+	*_length = result;
+	return B_OK;
+}
+
+
+static status_t
+device_write(void* cookie, off_t position, const void* buffer, size_t* _length)
+{
+	*_length = 0;
+	return B_NOT_ALLOWED;
+}
+
+
+static void
+select_notify(void* _state, unsigned int events)
+{
+	SelectState* state = (SelectState*)_state;
+	// POLLIN 0x1, POLLRDNORM 0x40
+	if (state->event == B_SELECT_READ && (events & (0x1 | 0x40)) != 0)
+		notify_select_event(state->sync, state->event);
+}
+
+
+static status_t
+device_select(void* _cookie, uint8 event, uint32 ref, selectsync* sync)
+{
+	DeviceCookie* cookie = (DeviceCookie*)_cookie;
+	if (event != B_SELECT_READ)
+		return B_BAD_VALUE;
+
+	SelectState* state = new(std::nothrow) SelectState;
+	if (state == NULL)
+		return B_NO_MEMORY;
+	state->sync = sync;
+	state->event = event;
+
+	unsigned int ready = 0;
+	state->glueSelect = lx_glue_select(cookie->file, select_notify, state,
+		&ready);
+	if (state->glueSelect == NULL) {
+		delete state;
+		return B_NO_MEMORY;
+	}
+	// the selectsync identifies the state when deselecting
+	MutexLocker locker(cookie->lock);
+	cookie->selects.Add(state);
+	locker.Unlock();
+
+	if ((ready & (0x1 | 0x40)) != 0)
+		notify_select_event(sync, event);
+	return B_OK;
+}
+
+
+static status_t
+device_deselect(void* _cookie, uint8 event, selectsync* sync)
+{
+	DeviceCookie* cookie = (DeviceCookie*)_cookie;
+	MutexLocker locker(cookie->lock);
+	SelectState* state = NULL;
+	for (SelectList::Iterator it = cookie->selects.GetIterator();
+			SelectState* candidate = it.Next();) {
+		if (candidate->sync == sync && candidate->event == event) {
+			it.Remove();
+			state = candidate;
+			break;
+		}
+	}
+	locker.Unlock();
+	if (state == NULL)
+		return B_BAD_VALUE;
+	lx_glue_deselect(state->glueSelect);
+	delete state;
+	return B_OK;
+}
+
+
+static device_hooks sDeviceHooks = {
+	device_open,
+	device_close,
+	device_free,
+	device_control,
+	device_read,
+	device_write,
+	device_select,
+	device_deselect,
+	NULL,
+	NULL
+};
+
+
+// #pragma mark - driver
+
+
+static bool sSelfTest;
+
+
+static bool
+self_test_requested()
+{
+	void* handle = load_driver_settings(DRIVER_NAME);
+	if (handle == NULL)
+		return false;
+	bool selfTest = get_driver_boolean_parameter(handle, "haiku_selftest",
+		false, true);
+	unload_driver_settings(handle);
+	return selfTest;
+}
+
+
+static void
+apply_settings()
+{
+	void* handle = load_driver_settings(DRIVER_NAME);
+	if (handle == NULL)
+		return;
+	const driver_settings* settings = get_driver_settings(handle);
+	for (int i = 0; settings != NULL && i < settings->parameter_count; i++) {
+		const driver_parameter& parameter = settings->parameters[i];
+		if (parameter.value_count > 0
+			&& strcmp(parameter.name, "haiku_selftest") != 0)
+			lx_glue_set_param(parameter.name, parameter.values[0]);
+	}
+	unload_driver_settings(handle);
+}
+
+
+static bool
+is_amd_gpu(const pci_info& info)
+{
+	return info.vendor_id == 0x1002 && info.class_base == PCI_display;
+}
+
+
+/*	Lab builds (AMDGPU_DRM_ARMED_ONLY) start only when the arm file exists,
+	and delete it first: a start that brings the machine down cannot repeat
+	on the next boot, when nobody may be there to pick another boot option. */
+#ifdef AMDGPU_DRM_ARMED_ONLY
+static const char* kArmFile
+	= "/boot/home/config/settings/kernel/drivers/amdgpu_drm.arm";
+
+static bool
+consume_arm_file()
+{
+	struct stat st;
+	if (stat(kArmFile, &st) != 0)
+		return false;
+	_kern_unlink(-1, kArmFile);
+	_kern_sync();
+	return true;
+}
+#endif
+
+
+status_t
+init_hardware(void)
+{
+#ifdef AMDGPU_DRM_ARMED_ONLY
+	if (!consume_arm_file()) {
+		TRACE("not armed (%s), not starting\n", kArmFile);
+		return B_ERROR;
+	}
+#endif
+
+	pci_module_info* pci;
+	if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) != B_OK)
+		return B_ERROR;
+	pci_info info;
+	status_t status = B_ENTRY_NOT_FOUND;
+	sSelfTest = self_test_requested();
+	if (sSelfTest)
+		status = B_OK;
+	for (int32 i = 0; pci->get_nth_pci_info(i, &info) == B_OK; i++) {
+		if (is_amd_gpu(info)) {
+			status = B_OK;
+			break;
+		}
+	}
+	put_module(B_PCI_MODULE_NAME);
+	return status;
+}
+
+
+status_t
+init_driver(void)
+{
+	pci_module_info* pci;
+	if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) != B_OK)
+		return B_ERROR;
+
+	TRACE("starting Linux DRM and amdgpu\n");
+	apply_settings();
+	int error = lx_glue_init();
+	if (error != 0) {
+		TRACE("start failed: %d\n", error);
+		put_module(B_PCI_MODULE_NAME);
+		return haiku_status(error);
+	}
+	sStarted = true;
+
+	if (sSelfTest) {
+		int failures = lx_glue_selftest();
+		TRACE("self test: %d failure(s); stopping again\n", failures);
+		lx_glue_uninit();
+		sStarted = false;
+		put_module(B_PCI_MODULE_NAME);
+		TRACE("self test: stopped\n");
+		return B_ERROR;
+	}
+
+	pci_info info;
+	int gpus = 0;
+	for (int32 i = 0; pci->get_nth_pci_info(i, &info) == B_OK; i++) {
+		if (!is_amd_gpu(info))
+			continue;
+		if (lx_glue_probe(info.bus, info.device, info.function) == 0)
+			gpus++;
+	}
+	put_module(B_PCI_MODULE_NAME);
+
+	int minors[kMaxDevices];
+	int count = lx_glue_minors(minors, kMaxDevices);
+	for (int i = 0; i < count; i++) {
+		char name[32];
+		if (minors[i] >= 128)
+			snprintf(name, sizeof(name), "dri/renderD%d", minors[i]);
+		else
+			snprintf(name, sizeof(name), "dri/card%d", minors[i]);
+		sDeviceNames[sDeviceCount] = strdup(name);
+		sDeviceMinors[sDeviceCount] = minors[i];
+		sDeviceCount++;
+	}
+	sDeviceNames[sDeviceCount] = NULL;
+	TRACE("%d GPU(s), %d device(s)\n", gpus, sDeviceCount);
+	return B_OK;
+}
+
+
+void
+uninit_driver(void)
+{
+	for (int i = 0; i < sDeviceCount; i++)
+		free(sDeviceNames[i]);
+	sDeviceCount = 0;
+	if (sStarted)
+		lx_glue_uninit();
+	sStarted = false;
+}
+
+
+const char**
+publish_devices(void)
+{
+	return (const char**)sDeviceNames;
+}
+
+
+device_hooks*
+find_device(const char* name)
+{
+	return minor_of(name) >= 0 ? &sDeviceHooks : NULL;
+}

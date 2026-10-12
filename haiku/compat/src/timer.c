@@ -124,10 +124,12 @@ timer_list_deadline(const struct timer_list *timer)
 }
 
 
+static bool timer_thread_stop;
+
 static int
 timer_thread_main(void *unused)
 {
-	for (;;) {
+	while (!READ_ONCE(timer_thread_stop)) {
 		struct timer_list *timer = NULL;
 		struct hrtimer *hrtimer = NULL;
 		s64 now = lx_system_time_ns();
@@ -213,6 +215,24 @@ timer_start_thread(void)
 	}
 	mutex_unlock(&start_lock);
 	(void)timer_deadlines;
+}
+
+
+void lx_timer_exit(void);
+
+void
+lx_timer_exit(void)
+{
+	struct task_struct *thread = smp_load_acquire(&timer_thread);
+	if (thread == NULL)
+		return;
+	WRITE_ONCE(timer_thread_stop, true);
+	lx_haiku_event_signal(timer_event);
+	kthread_stop(thread);
+	timer_thread = NULL;
+	timer_thread_stop = false;
+	lx_haiku_event_delete(timer_event);
+	timer_event = NULL;
 }
 
 

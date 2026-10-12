@@ -138,6 +138,46 @@ fixed_size_llseek(struct file *file, loff_t offset, int whence, loff_t size)
 }
 
 
+struct inode *
+alloc_anon_inode(struct super_block *sb)
+{
+	struct inode *inode = kzalloc(sizeof(*inode), GFP_KERNEL);
+	if (inode == NULL)
+		return ERR_PTR(-ENOMEM);
+	inode->i_mapping = &inode->i_data;
+	inode->i_data.host = inode;
+	inode->i_sb = sb;
+	atomic_set(&inode->i_count, 1);
+	return inode;
+}
+
+
+void
+iput(struct inode *inode)
+{
+	if (inode != NULL && atomic_dec_and_test(&inode->i_count))
+		kfree(inode);
+}
+
+
+int
+simple_pin_fs(struct file_system_type *type, struct vfsmount **mount,
+	int *count)
+{
+	static struct vfsmount pseudo_mount;
+	*mount = &pseudo_mount;
+	(*count)++;
+	return 0;
+}
+
+
+void
+simple_release_fs(struct vfsmount **mount, int *count)
+{
+	(*count)--;
+}
+
+
 int
 nonseekable_open(struct inode *inode, struct file *filp)
 {

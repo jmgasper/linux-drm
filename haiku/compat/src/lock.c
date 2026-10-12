@@ -502,6 +502,20 @@ struct lx_kfree_rcu_entry {
 	void *object;
 };
 
+void lx_rcu_exit(void);
+
+void
+lx_rcu_exit(void)
+{
+	struct task_struct *thread = READ_ONCE(rcu_thread);
+	if (thread == NULL)
+		return;
+	rcu_barrier();
+	kthread_stop(thread);
+	rcu_thread = NULL;
+}
+
+
 static void
 lx_kfree_rcu_callback(struct rcu_head *head)
 {

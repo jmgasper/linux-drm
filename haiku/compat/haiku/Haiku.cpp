@@ -28,6 +28,7 @@
 #include <sys/uio.h>
 #include <util/iovec_support.h>
 #include <vfs.h>
+#include <syscalls.h>
 #include <vm/vm.h>
 #include <vm/vm_page.h>
 #include <vm/VMAddressSpace.h>
@@ -50,10 +51,39 @@ static const int kLinuxETIMEDOUT = 110;
 // #pragma mark - output, time, processors
 
 
+static int sLogFile = -1;
+static mutex sLogFileLock = MUTEX_INITIALIZER("amdgpu_drm log file");
+
+
+extern "C" int
+lx_haiku_log_file(const char* path)
+{
+	MutexLocker locker(sLogFileLock);
+	if (sLogFile >= 0) {
+		_kern_close(sLogFile);
+		sLogFile = -1;
+	}
+	if (path == NULL || path[0] == '\0')
+		return 0;
+	int fd = _kern_open(-1, path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0)
+		return -kLinuxEIO;
+	sLogFile = fd;
+	return 0;
+}
+
+
 extern "C" void
 lx_haiku_log(const char* text)
 {
 	dprintf("%s", text);
+	if (sLogFile >= 0 && are_interrupts_enabled()) {
+		MutexLocker locker(sLogFileLock);
+		if (sLogFile >= 0) {
+			_kern_write(sLogFile, -1, text, strlen(text));
+			_kern_fsync(sLogFile, false);
+		}
+	}
 }
 
 
@@ -698,7 +728,7 @@ lx_haiku_pages_free(void* firstPage, unsigned long count)
 		vm_page* current = i == 0 ? page : vm_lookup_page(first + i);
 		if (current == NULL)
 			continue;
-		vm_page_set_state(current, PAGE_STATE_FREE);
+		vm_page_free(NULL, current);
 	}
 }
 
@@ -774,9 +804,17 @@ lx_haiku_vmap(const unsigned long long* physical, unsigned long count,
 	}
 	void* address = NULL;
 	addr_t size = count * B_PAGE_SIZE;
+	// Older kernels map scattered pages only with the default memory type
 	area_id area = vm_map_physical_memory_vecs(VMAddressSpace::KernelID(),
 		"linux vmap", &address, B_ANY_KERNEL_ADDRESS | memory_type(type),
 		&size, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, vecs, count);
+	if (area == B_NOT_SUPPORTED) {
+		address = NULL;
+		size = count * B_PAGE_SIZE;
+		area = vm_map_physical_memory_vecs(VMAddressSpace::KernelID(),
+			"linux vmap", &address, B_ANY_KERNEL_ADDRESS, &size,
+			B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, vecs, count);
+	}
 	free(vecs);
 	if (area < 0)
 		return NULL;

@@ -12,6 +12,7 @@
 
 struct inode;
 struct file;
+struct file_system_type;
 struct dentry;
 struct vfsmount;
 struct super_block;
@@ -178,11 +179,15 @@ struct fasync_struct { int dummy; };
 #define kill_fasync(fa, sig, band)	do { } while (0)
 #define SIGIO	29
 #define POLL_IN	1
-#define iput(inode)		do { } while (0)
+struct vfsmount {
+	struct super_block *mnt_sb;
+};
+void iput(struct inode *inode);
 #define igrab(inode)	(inode)
-#define alloc_anon_inode(sb)	ERR_PTR(-ENOSYS)
-#define simple_pin_fs(type, mount, count)	(-ENOSYS)
-#define simple_release_fs(mount, count)	do { } while (0)
+struct inode *alloc_anon_inode(struct super_block *sb);
+int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount,
+	int *count);
+void simple_release_fs(struct vfsmount **mount, int *count);
 #define kern_mount(type)	ERR_PTR(-ENOSYS)
 #define kern_unmount(mnt)	do { } while (0)
 #define alloc_file_pseudo(inode, mnt, name, flags, fops)	ERR_PTR(-ENOSYS)

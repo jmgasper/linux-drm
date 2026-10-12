@@ -26,14 +26,17 @@ GCCLIB := $(dir $(shell $(CC) -print-libgcc-file-name))
 HAIKU_OBJ := $(HAIKU_BUILD)/objects/haiku/x86_64/release
 GCC_SYSLIBS := $(firstword $(wildcard $(HAIKU_BUILD)/build_packages/gcc_syslibs_devel-*))
 
-ADDON := $(OUT)/amdgpu
+ADDON := $(OUT)/amdgpu_drm
+
+# Lab builds: make ... ARMED_ONLY=1 (see driver.cpp)
+HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY)
 
 # --- flags -------------------------------------------------------------------
 
 # Kernel add-on code generation, as Haiku's KernelAddon rule uses it.
 KFLAGS := -O2 -fpic -mno-red-zone -fno-omit-frame-pointer -ffreestanding \
 	-fno-strict-aliasing -fno-common -fno-delete-null-pointer-checks \
-	-fno-strict-overflow -fno-stack-protector -g1 -MMD -MP
+	-fno-strict-overflow -fno-stack-protector -fconserve-stack -g1 -MMD -MP
 
 # Linux sources: Linux's language dialect and warnings, the compat headers
 # instead of Linux's include/ and arch/ trees, and our kernel configuration.
@@ -78,7 +81,7 @@ HAIKU_INCLUDES := -I$(COMPAT)/haiku -I$(DRIVER) \
 	-I$(HAIKU_TOP)/headers/os/device -I$(HAIKU_TOP)/headers/os/storage \
 	-I$(HAIKU_TOP)/headers/os/app -I$(HAIKU_TOP)/headers/os/interface \
 	-I$(HAIKU_TOP)/headers/os/add-ons/graphics
-HXXFLAGS := -std=gnu++20 -nostdinc $(KFLAGS) -fno-exceptions \
+HXXFLAGS := -std=gnu++20 -nostdinc $(KFLAGS) -fno-exceptions $(HAIKU_DEFINES) \
 	-fno-use-cxa-atexit -D_KERNEL_MODE -D_DEFAULT_SOURCE -DARCH_x86_64 \
 	-DHAIKU_TARGET_PLATFORM_HAIKU -Wall -Wno-multichar \
 	-Wno-missing-field-initializers $(HAIKU_INCLUDES)
@@ -95,6 +98,7 @@ CORE_SRCS := $(shell cat $(BUILDDIR)/sources-core.txt) \
 AMD_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu.txt)
 AMD_FP_SRCS := $(shell cat $(BUILDDIR)/sources-amdgpu-fp.txt)
 LX_COMPAT_SRCS := $(wildcard $(COMPAT)/src/*.c)
+GLUE_SRCS := $(wildcard $(DRIVER)/*.c)
 HAIKU_SRCS := $(wildcard $(COMPAT)/haiku/*.cpp) $(wildcard $(DRIVER)/*.cpp)
 
 obj = $(patsubst %.c,$(OUT)/obj/linux/%.o,$(1))
@@ -102,8 +106,10 @@ CORE_OBJS := $(call obj,$(CORE_SRCS))
 AMD_OBJS := $(call obj,$(AMD_SRCS))
 AMD_FP_OBJS := $(call obj,$(AMD_FP_SRCS))
 LX_COMPAT_OBJS := $(patsubst $(COMPAT)/src/%.c,$(OUT)/obj/compat/%.o,$(LX_COMPAT_SRCS))
+GLUE_OBJS := $(patsubst $(DRIVER)/%.c,$(OUT)/obj/glue/%.o,$(GLUE_SRCS))
 HAIKU_OBJS := $(patsubst $(ROOT)/haiku/%.cpp,$(OUT)/obj/haiku/%.o,$(HAIKU_SRCS))
-ALL_OBJS := $(CORE_OBJS) $(AMD_OBJS) $(AMD_FP_OBJS) $(LX_COMPAT_OBJS) $(HAIKU_OBJS)
+ALL_OBJS := $(CORE_OBJS) $(AMD_OBJS) $(AMD_FP_OBJS) $(LX_COMPAT_OBJS) $(GLUE_OBJS) \
+	$(HAIKU_OBJS)
 
 # per-group flags; every Linux file also sees its own directory, like kbuild
 $(AMD_OBJS) $(AMD_FP_OBJS): GROUP_FLAGS := $(AMD_INCLUDES) -DBUILD_FEATURE_TIMING_SYNC=0
@@ -129,6 +135,11 @@ $(OUT)/obj/compat/%.o: $(COMPAT)/src/%.c
 	@echo "  CC   compat/$*.c"
 	@$(CC) $(LXFLAGS) -DKBUILD_MODNAME='"amdgpu"' -c $< -o $@
 
+$(OUT)/obj/glue/%.o: $(DRIVER)/%.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   glue/$*.c"
+	@$(CC) $(LXFLAGS) $(AMD_INCLUDES) -DKBUILD_MODNAME='"amdgpu"' -c $< -o $@
+
 $(OUT)/obj/haiku/%.o: $(ROOT)/haiku/%.cpp
 	@mkdir -p $(dir $@)
 	@echo "  C++  $*.cpp"
@@ -141,7 +152,7 @@ check:
 
 $(ADDON): $(ALL_OBJS)
 	@echo "  LD   $@"
-	@$(LD) -o $@ -z max-page-size=0x1000 -shared --no-undefined \
+	@$(LD) -o $@ -z max-page-size=0x1000 -shared --no-undefined -Bsymbolic \
 		$(GCCLIB)crtbeginS.o $(ALL_OBJS) $(HAIKU_OBJ)/system/kernel/kernel.so \
 		$(HAIKU_OBJ)/system/glue/haiku_version_glue.o $(GCCLIB)libgcc.a \
 		$(GCCLIB)crtendS.o

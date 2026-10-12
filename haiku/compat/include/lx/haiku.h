@@ -18,6 +18,8 @@ typedef __INT32_TYPE__ lx_thread_id;
 
 /* output */
 void lx_haiku_log(const char *text);
+/* bring-up: also append every message to a file, synced per message */
+int lx_haiku_log_file(const char *path);
 void lx_haiku_panic(const char *text) __attribute__((noreturn));
 void lx_haiku_dump_stack(void);
 

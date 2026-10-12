@@ -74,10 +74,22 @@ struct kernel_param {
 	const struct kernel_param_ops *ops;
 	void *arg;
 };
-#define module_param(name, type, perm)
-#define module_param_named(name, value, type, perm)
-#define module_param_unsafe(name, type, perm)
-#define module_param_named_unsafe(name, value, type, perm)
+/*	Parameters are listed in the lx_params section, so the Haiku driver can
+	set them from its settings file before the drivers start. */
+struct lx_param {
+	const char *name;
+	void *value;
+	const char *type;
+};
+#define __lx_module_param(pname, var, ptype) \
+	static const struct lx_param __UNIQUE_ID(lx_param) __used \
+		__section("lx_params") __aligned(8) = { #pname, &(var), #ptype }
+#define module_param(name, type, perm)	__lx_module_param(name, name, type)
+#define module_param_named(name, value, type, perm) \
+	__lx_module_param(name, value, type)
+#define module_param_unsafe(name, type, perm)	__lx_module_param(name, name, type)
+#define module_param_named_unsafe(name, value, type, perm) \
+	__lx_module_param(name, value, type)
 #define module_param_string(name, string, len, perm)
 #define module_param_array(name, type, nump, perm)
 #define module_param_array_named(name, array, type, nump, perm)
