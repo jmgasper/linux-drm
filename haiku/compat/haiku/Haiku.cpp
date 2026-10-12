@@ -482,6 +482,12 @@ lx_haiku_signal_pending(int fatalOnly)
 extern "C" void __cyg_profile_func_enter(void* function, void* site);
 
 
+/*	Not exported by every kernel (Haiku R1/beta6's lacks it): weak, so that
+	the driver loads without it and logs no stack there. */
+extern "C" int32 arch_get_stack_trace(addr_t* returnAddresses, int32 maxCount,
+	int32 skipIframes, int32 skipMore, uint32 flags) __attribute__((weak));
+
+
 /*	Logs the current thread's kernel stack, return addresses after a header
 	with the address of the trace anchor (see compat/src/trace.c), which
 	tools/symbolize-trace.sh turns into names. */
@@ -489,7 +495,8 @@ extern "C" void
 lx_haiku_log_stack(const char* what)
 {
 	addr_t addresses[24];
-	int32 count = arch_get_stack_trace(addresses, 24, 0, 1, STACK_TRACE_KERNEL);
+	int32 count = arch_get_stack_trace != NULL
+		? arch_get_stack_trace(addresses, 24, 0, 1, STACK_TRACE_KERNEL) : 0;
 	char line[192];
 	snprintf(line, sizeof(line), "stack of thread %" B_PRId32 " (%s), anchor "
 		"%#lx: %s\n", thread_get_current_thread_id(),
