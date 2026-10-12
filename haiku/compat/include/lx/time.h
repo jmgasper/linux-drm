@@ -175,7 +175,6 @@ struct timer_list {
 	void (*function)(struct timer_list *);
 	u32 flags;
 	int queued;
-	int running;
 };
 
 #define TIMER_DEFERRABLE	0x00080000
@@ -242,7 +241,6 @@ struct hrtimer {
 	struct list_head entry;
 	enum hrtimer_restart (*function)(struct hrtimer *);
 	int queued;
-	int running;
 	int clock;
 };
 
@@ -271,8 +269,10 @@ u64 hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval);
 #define hrtimer_set_expires_range_ns(timer, time, delta) ((timer)->node.expires = (time))
 #define hrtimer_add_expires_ns(timer, ns)	((timer)->node.expires += (ns))
 #define hrtimer_is_queued(timer)	READ_ONCE((timer)->queued)
-#define hrtimer_active(timer)	(READ_ONCE((timer)->queued) || READ_ONCE((timer)->running))
-#define hrtimer_callback_running(timer)	READ_ONCE((timer)->running)
+int lx_hrtimer_callback_running(const struct hrtimer *timer);
+#define hrtimer_active(timer) \
+	(READ_ONCE((timer)->queued) || lx_hrtimer_callback_running(timer))
+#define hrtimer_callback_running(timer)	lx_hrtimer_callback_running(timer)
 #define hrtimer_cb_get_time(timer)	ktime_get()
 #define hrtimer_get_remaining(timer)	ktime_sub((timer)->node.expires, ktime_get())
 #define hrtimer_expires_remaining(timer)	ktime_sub((timer)->node.expires, ktime_get())

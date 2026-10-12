@@ -195,7 +195,9 @@ queue_delayed_work_on(int cpu, struct workqueue_struct *wq,
 }
 
 
-/* Takes a pending work off its queue or timer; true if it was pending. */
+/*	Takes a pending work off its queue or timer; true if it was pending.
+	A timer that is firing right now is waited for: it is about to queue the
+	work, which is then taken off the queue. */
 static bool
 try_to_grab_pending(struct work_struct *work, struct delayed_work *dwork)
 {
@@ -204,7 +206,7 @@ try_to_grab_pending(struct work_struct *work, struct delayed_work *dwork)
 	if (!test_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work)))
 		return false;
 
-	if (dwork != NULL && timer_delete(&dwork->timer)) {
+	if (dwork != NULL && timer_delete_sync(&dwork->timer)) {
 		clear_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work));
 		return true;
 	}
@@ -300,7 +302,8 @@ flush_work(struct work_struct *work)
 bool
 flush_delayed_work(struct delayed_work *dwork)
 {
-	if (timer_delete(&dwork->timer))
+	/* a timer firing right now has queued the work once this returns */
+	if (timer_delete_sync(&dwork->timer))
 		__queue_work(dwork->wq, &dwork->work);
 	return flush_work(&dwork->work);
 }
@@ -335,15 +338,14 @@ cancel_delayed_work(struct delayed_work *dwork)
 bool
 cancel_delayed_work_sync(struct delayed_work *dwork)
 {
-	bool pending;
-	timer_delete_sync(&dwork->timer);
-	pending = try_to_grab_pending(&dwork->work, dwork);
-	if (dwork->wq != NULL || dwork->work.wq != NULL) {
-		struct workqueue_struct *wq = dwork->work.wq;
-		struct lx_worker *self = current_worker();
-		if (wq != NULL && !(self != NULL && self->current_work == &dwork->work))
-			wait_event(wq->done, !work_running(wq, &dwork->work));
-	}
+	struct work_struct *work = &dwork->work;
+	struct lx_worker *self = current_worker();
+	struct workqueue_struct *wq;
+	bool pending = try_to_grab_pending(work, dwork);
+
+	wq = READ_ONCE(work->wq);
+	if (wq != NULL && !(self != NULL && self->current_work == work))
+		wait_event(wq->done, !work_running(wq, work));
 	return pending;
 }
 

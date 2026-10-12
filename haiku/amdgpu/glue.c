@@ -33,6 +33,7 @@ int lx_module_init_drm_display_helper_module_init(void);
 int lx_module_init_drm_sched_fence_slab_init(void);
 int lx_module_init_amdgpu_init(void);
 void lx_module_exit_amdgpu_exit(void);
+void lx_trace_calls_start(void);
 void lx_module_exit_drm_sched_fence_slab_fini(void);
 void lx_module_exit_drm_display_helper_module_exit(void);
 void lx_module_exit_gpu_buddy_module_exit(void);
@@ -323,6 +324,7 @@ lx_glue_open(int minor, int flags, int *_error)
 void
 lx_glue_close(void *file)
 {
+	lx_trace_calls_start();
 	fput(file);
 }
 

@@ -3651,6 +3651,8 @@ static void amdgpu_ip_block_hw_fini(struct amdgpu_ip_block *ip_block)
 		dev_err(adev->dev, "hw_fini of IP block <%s> not defined\n",
 			ip_block->version->funcs->name);
 	} else {
+		DRM_DEBUG_DRIVER("hw_fini of IP block <%s>\n",
+				 ip_block->version->funcs->name);
 		r = ip_block->version->funcs->hw_fini(ip_block);
 		/* XXX handle errors */
 		if (r) {
@@ -3768,6 +3770,8 @@ static int amdgpu_device_ip_fini(struct amdgpu_device *adev)
 			amdgpu_doorbell_fini(adev);
 		}
 		if (adev->ip_blocks[i].version->funcs->sw_fini) {
+			DRM_DEBUG_DRIVER("sw_fini of IP block <%s>\n",
+					 adev->ip_blocks[i].version->funcs->name);
 			r = adev->ip_blocks[i].version->funcs->sw_fini(&adev->ip_blocks[i]);
 			/* XXX handle errors */
 			if (r) {

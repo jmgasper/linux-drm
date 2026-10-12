@@ -32,16 +32,12 @@ static int sProgress = -1;
 static off_t sProgressOffset;
 
 
-/*	Before each stage: a line in the progress file, on disk before the stage
-	runs, so the stage that stopped the machine is known afterwards. */
-static int
-stage(int number, const char* name)
+/*	A line in the progress file, on disk before the step it announces runs,
+	so the step that stopped the machine is known afterwards. */
+static void
+progress(const char* line)
 {
-	char line[128];
-	int length;
-	if (number > sLastStage)
-		return 0;
-	length = snprintf(line, sizeof(line), "stage %d: %s\n", number, name);
+	int length = strlen(line);
 	if (sProgress >= 0) {
 		// the file is preallocated: overwriting changes no file system
 		// structure a crash could lose
@@ -51,6 +47,18 @@ stage(int number, const char* name)
 	}
 	printf("%s", line);
 	fflush(stdout);
+}
+
+
+/*	Before each stage; false past the last stage asked for. */
+static int
+stage(int number, const char* name)
+{
+	char line[128];
+	if (number > sLastStage)
+		return 0;
+	snprintf(line, sizeof(line), "stage %d: %s\n", number, name);
+	progress(line);
 	return 1;
 }
 
@@ -132,17 +140,39 @@ map_gpu_va(int fd, uint32_t handle, uint64_t address, uint64_t size)
 }
 
 
+static void
+unmap_buffer(int fd, void* address)
+{
+	struct drm_haiku_unmap unmap;
+	if (address == NULL)
+		return;
+	unmap.address = (uintptr_t)address;
+	CHECK(drm_ioctl(fd, DRM_HAIKU_IOCTL_UNMAP, &unmap) == 0, "HAIKU_UNMAP %p",
+		address);
+}
+
+
+/*	amdgpu_smoke [device [last stage [progress file [hold seconds]]]]
+	After the last stage, waits the hold time, then unmaps the buffers and
+	closes the device, each step announced in the progress file. */
 int
 main(int argc, char** argv)
 {
 	const char* path = argc > 1 ? argv[1] : "/dev/dri/renderD128";
+	int hold = 0;
+	int fd = -1;
+	uint32_t* gttMap = NULL;
+	uint32_t* vramMap = NULL;
+	uint32_t* ibMap = NULL;
 	if (argc > 2)
 		sLastStage = atoi(argv[2]);
 	if (argc > 3)
 		sProgress = open(argv[3], O_WRONLY);
+	if (argc > 4)
+		hold = atoi(argv[4]);
 	if (!stage(1, "open and info"))
 		return 0;
-	int fd = open(path, O_RDWR);
+	fd = open(path, O_RDWR);
 	if (fd < 0) {
 		printf("FAIL  open %s: %s\n", path, strerror(errno));
 		return 1;
@@ -200,7 +230,7 @@ main(int argc, char** argv)
 
 	// buffers
 	if (!stage(2, "GEM_CREATE"))
-		return 0;
+		goto done;
 	const uint64_t size = 64 * 1024;
 	uint32_t gtt = create_buffer(fd, size, AMDGPU_GEM_DOMAIN_GTT, 0);
 	uint32_t vram = create_buffer(fd, size, AMDGPU_GEM_DOMAIN_VRAM,
@@ -209,23 +239,23 @@ main(int argc, char** argv)
 	CHECK(gtt != 0 && vram != 0 && ib != 0, "GEM_CREATE GTT, VRAM, IB");
 
 	if (!stage(3, "map GTT"))
-		return 0;
-	uint32_t* gttMap = map_buffer(fd, gtt, size);
+		goto done;
+	gttMap = map_buffer(fd, gtt, size);
 	if (!stage(4, "map VRAM and IB"))
-		return 0;
-	uint32_t* vramMap = map_buffer(fd, vram, size);
-	uint32_t* ibMap = map_buffer(fd, ib, 4096);
+		goto done;
+	vramMap = map_buffer(fd, vram, size);
+	ibMap = map_buffer(fd, ib, 4096);
 	CHECK(gttMap != NULL && vramMap != NULL && ibMap != NULL,
 		"mapped: GTT %p, VRAM %p, IB %p", gttMap, vramMap, ibMap);
 	if (gttMap == NULL || vramMap == NULL || ibMap == NULL)
-		return 1;
+		goto done;
 
 	if (!stage(5, "CPU writes GTT"))
-		return 0;
+		goto done;
 	for (uint32_t i = 0; i < size / 4; i++)
 		gttMap[i] = 0x11110000 + i;
 	if (!stage(6, "CPU writes VRAM"))
-		return 0;
+		goto done;
 	for (uint32_t i = 0; i < size / 4; i++)
 		vramMap[i] = 0x22220000 + i;
 	int same = 1;
@@ -237,7 +267,7 @@ main(int argc, char** argv)
 
 	// GPU addresses
 	if (!stage(7, "GEM_VA"))
-		return 0;
+		goto done;
 	const uint64_t gttAddress = 0x100000, vramAddress = 0x200000,
 		ibAddress = 0x300000;
 	CHECK(map_gpu_va(fd, gtt, gttAddress, size) == 0
@@ -246,7 +276,7 @@ main(int argc, char** argv)
 
 	// context
 	if (!stage(8, "CTX"))
-		return 0;
+		goto done;
 	union drm_amdgpu_ctx ctx;
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
@@ -301,14 +331,14 @@ main(int argc, char** argv)
 	cs.in.num_chunks = 2;
 	cs.in.chunks = (uintptr_t)chunkPointers;
 	if (!stage(9, "CS"))
-		return 0;
+		goto done;
 	int result = drm_ioctl(fd, DRM_IOCTL_AMDGPU_CS, &cs);
 	CHECK(result == 0, "CS submit on GFX: handle %llu%s%s",
 		(unsigned long long)cs.out.handle, result != 0 ? " " : "",
 		result != 0 ? strerror(errno) : "");
 
 	if (!stage(10, "WAIT_CS"))
-		return 0;
+		goto done;
 	union drm_amdgpu_wait_cs wait;
 	memset(&wait, 0, sizeof(wait));
 	wait.in.handle = cs.out.handle;
@@ -331,8 +361,18 @@ main(int argc, char** argv)
 	CHECK(gttMap[4] == 0x11110004 && vramMap[4] == 0x22220004,
 		"and nothing beyond");
 
-	stage(11, "close");
+done:
+	if (hold > 0) {
+		progress("exit: hold\n");
+		sleep(hold);
+	}
+	progress("exit: unmap\n");
+	unmap_buffer(fd, gttMap);
+	unmap_buffer(fd, vramMap);
+	unmap_buffer(fd, ibMap);
+	progress("exit: close\n");
 	close(fd);
+	progress("exit: done\n");
 	printf("%d failure(s)\n", sFailures);
 	return sFailures != 0;
 }

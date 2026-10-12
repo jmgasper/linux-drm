@@ -4,6 +4,7 @@
 #
 #   haiku/tools/x399-deploy.sh [firmware dir]
 #
+# OUT=<build output dir> picks another build (default out/, e.g. out-trace).
 # The add-on goes to the user's non-packaged drivers as bin/amdgpu_drm,
 # linked from dev/dri/. Build it with ARMED_ONLY=1: it then starts only when
 # x399-arm.sh has created its one-shot arm file, and deletes that file
@@ -14,6 +15,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 FIRMWARE=${1:-/mnt/HaikuWork/x399/build/amdgpu-drm-stage/firmware}
+BIN=${OUT:-$ROOT/out}/amdgpu_drm
 CONFIG=/mnt/HaikuWork/x399/ssh/config
 SSH="ssh -F $CONFIG -o ConnectTimeout=10 ws-haiku"
 NP=/boot/home/config/non-packaged
@@ -27,14 +29,13 @@ if $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm"; then
 fi
 
 tar -C "$FIRMWARE" -cf - . | $SSH "mkdir -p $NP/data/firmware && tar -xmf - -C $NP/data/firmware"
-$SSH "cat > $DRV/bin/amdgpu_drm.tmp && chmod 755 $DRV/bin/amdgpu_drm.tmp && mv -f $DRV/bin/amdgpu_drm.tmp $DRV/bin/amdgpu_drm" < "$ROOT/out/amdgpu_drm"
+$SSH "cat > $DRV/bin/amdgpu_drm.tmp && chmod 755 $DRV/bin/amdgpu_drm.tmp && mv -f $DRV/bin/amdgpu_drm.tmp $DRV/bin/amdgpu_drm" < "$BIN"
 $SSH "rm -rf $DRV/dev/amdgpu_test && mkdir -p $DRV/dev/dri && ln -sf ../../bin/amdgpu_drm $DRV/dev/dri/amdgpu_drm && sync"
 # the test programs, built on the workstation
 tar -C "$ROOT" -cf - haiku/tests linux/include/uapi/drm haiku/compat/include/drm/drm_haiku.h \
 	| $SSH "mkdir -p /boot/home/amdgpu-drm && cd /boot/home/amdgpu-drm && tar -xmf - \
-		&& gcc -O2 -o rescan haiku/tests/rescan.c \
 		&& gcc -O2 -Ilinux/include/uapi -Ihaiku/compat/include -o amdgpu_smoke haiku/tests/amdgpu_smoke.c"
-local=$(sha256sum "$ROOT/out/amdgpu_drm" | cut -d' ' -f1)
+local=$(sha256sum "$BIN" | cut -d' ' -f1)
 remote=$($SSH "sha256sum $DRV/bin/amdgpu_drm" | cut -d' ' -f1)
 [ "$local" = "$remote" ] || { echo "checksum mismatch" >&2; exit 1; }
 echo "installed amdgpu_drm $local"

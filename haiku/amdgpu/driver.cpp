@@ -41,6 +41,21 @@
 #define DRIVER_NAME "amdgpu_drm"
 #define TRACE(x...) dprintf(DRIVER_NAME ": " x)
 
+#ifdef AMDGPU_DRM_ARMED_ONLY
+// lab builds: steps that may stop the machine go to the synced log file too
+extern "C" void lx_haiku_log(const char* text);
+extern "C" void lx_trace_calls_start(void);
+#	define LAB_LOG(x...) \
+	do { \
+		char _line[200]; \
+		snprintf(_line, sizeof(_line), DRIVER_NAME ": " x); \
+		lx_haiku_log(_line); \
+	} while (0)
+#else
+#	define LAB_LOG(x...) do { } while (0)
+#	define lx_trace_calls_start() do { } while (0)
+#endif
+
 // Linux's DRM ioctl numbers (asm-generic/ioctl.h) for the Haiku additions
 #define LX_IOC(dir, type, nr, size) \
 	(((uint32)(dir) << 30) | ((uint32)(size) << 16) | ((type) << 8) | (nr))
@@ -238,6 +253,9 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 		cookie->mappings.Add(record);
 	}
 
+	LAB_LOG("map 0x%" B_PRIx64 " size 0x%" B_PRIx64 ": area %" B_PRId32
+		" at 0x%lx, %" B_PRIu32 " range(s), caching %d\n", request->offset,
+		request->size, area, (addr_t)address, vecCount, caching);
 	request->area = area;
 	request->address = (addr_t)address;
 	return B_OK;
@@ -255,12 +273,16 @@ unmap_buffer(DeviceCookie* cookie, addr_t address)
 			continue;
 		it.Remove();
 		locker.Unlock();
+		lx_trace_calls_start();
+		LAB_LOG("unmap 0x%lx: area %" B_PRId32 "\n", address, record->area);
 		// the team may have deleted the area itself already
 		area_info info;
 		if (get_area_info(record->area, &info) == B_OK
 			&& info.team == team && (addr_t)info.address == address)
 			vm_delete_area(team, record->area, true);
+		LAB_LOG("unmap 0x%lx: area deleted\n", address);
 		lx_glue_unmap(record->glueMapping);
+		LAB_LOG("unmap 0x%lx: done\n", address);
 		delete record;
 		return B_OK;
 	}
@@ -334,8 +356,11 @@ static status_t
 device_free(void* _cookie)
 {
 	DeviceCookie* cookie = (DeviceCookie*)_cookie;
+	LAB_LOG("free minor %d: mappings\n", cookie->minor);
 	unmap_all(cookie);
+	LAB_LOG("free minor %d: close\n", cookie->minor);
 	lx_glue_close(cookie->file);
+	LAB_LOG("free minor %d: done\n", cookie->minor);
 	mutex_destroy(&cookie->lock);
 	delete cookie;
 	return B_OK;

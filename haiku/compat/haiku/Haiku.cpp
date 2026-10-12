@@ -105,6 +105,8 @@ lx_haiku_log(const char* text)
 extern "C" void
 lx_haiku_panic(const char* text)
 {
+	// the log file is the only record that survives on the lab machine
+	lx_haiku_log(text);
 	panic("%s", text);
 	for (;;)
 		;
@@ -729,6 +731,11 @@ lx_haiku_pages_alloc(unsigned long count, unsigned long long maxAddress,
 	}
 	if (page == NULL)
 		return NULL;
+	// With DEBUG_PAGE_ACCESS (KDEBUG_LEVEL 2), a page belongs to the thread
+	// that allocated it until that thread ends its access; Linux frees pages
+	// on any thread (TTM destroys busy buffers on a worker, for instance).
+	for (unsigned long i = 0; i < count; i++)
+		DEBUG_PAGE_ACCESS_END(&page[i]);
 	*physical = (unsigned long long)page->physical_page_number * B_PAGE_SIZE;
 	return page;
 }
@@ -743,6 +750,7 @@ lx_haiku_pages_free(void* firstPage, unsigned long count)
 		vm_page* current = i == 0 ? page : vm_lookup_page(first + i);
 		if (current == NULL)
 			continue;
+		DEBUG_PAGE_ACCESS_START(current);
 		vm_page_free(NULL, current);
 	}
 }

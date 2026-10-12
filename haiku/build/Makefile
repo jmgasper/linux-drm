@@ -31,6 +31,10 @@ ADDON := $(OUT)/amdgpu_drm
 # Lab builds: make ... ARMED_ONLY=1 (see driver.cpp)
 HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY)
 
+# Call trace builds (see compat/src/trace.c), best into their own OUT:
+#   make ... OUT=out-trace TRACE_CALLS="drivers/gpu/drm/ttm/ttm_bo.c ..."
+TRACE_CALLS ?=
+
 # --- flags -------------------------------------------------------------------
 
 # Kernel add-on code generation, as Haiku's KernelAddon rule uses it.
@@ -115,6 +119,8 @@ ALL_OBJS := $(CORE_OBJS) $(AMD_OBJS) $(AMD_FP_OBJS) $(LX_COMPAT_OBJS) $(GLUE_OBJ
 $(AMD_OBJS) $(AMD_FP_OBJS): GROUP_FLAGS := $(AMD_INCLUDES) -DBUILD_FEATURE_TIMING_SYNC=0
 $(AMD_FP_OBJS): GROUP_FLAGS += -msse -msse2 -mhard-float -D_LINUX_FPU_COMPILATION_UNIT
 $(CORE_OBJS): GROUP_FLAGS :=
+$(call obj,$(TRACE_CALLS)): GROUP_FLAGS += -finstrument-functions \
+	-finstrument-functions-exclude-file-list=/include/
 
 .PHONY: all core amdgpu compat haiku clean
 all: $(ADDON)

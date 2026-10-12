@@ -5,7 +5,11 @@
 
 /*	Time and timers. timer_list and hrtimer callbacks run on one thread,
 	in deadline order; each kind is kept on its own list sorted by deadline
-	in nanoseconds. The thread sleeps until the earliest deadline. */
+	in nanoseconds. The thread sleeps until the earliest deadline.
+	Once a callback has returned, the thread does not touch its timer again
+	(unless an hrtimer asks to be restarted): the callback, or a thread it
+	woke, may have freed it. Which callback runs is therefore kept here,
+	not in the timer. */
 
 #include <lx/haiku.h>
 
@@ -116,6 +120,8 @@ static s64 *timer_deadlines;			/* unused */
 static struct task_struct *timer_thread;
 static void *timer_event;
 static DECLARE_WAIT_QUEUE_HEAD(timer_callback_done);
+static struct timer_list *running_timer;	/* whose callback runs now */
+static struct hrtimer *running_hrtimer;
 
 static s64
 timer_list_deadline(const struct timer_list *timer)
@@ -155,18 +161,18 @@ timer_thread_main(void *unused)
 		if (timer != NULL) {
 			list_del_init(&timer->entry);
 			timer->queued = 0;
-			timer->running = 1;
+			WRITE_ONCE(running_timer, timer);
 		} else if (hrtimer != NULL) {
 			list_del_init(&hrtimer->entry);
 			hrtimer->queued = 0;
-			hrtimer->running = 1;
+			WRITE_ONCE(running_hrtimer, hrtimer);
 		}
 		spin_unlock(&timer_lock);
 
 		if (timer != NULL) {
 			timer->function(timer);
 			spin_lock(&timer_lock);
-			timer->running = 0;
+			WRITE_ONCE(running_timer, NULL);
 			spin_unlock(&timer_lock);
 			wake_up_all(&timer_callback_done);
 			continue;
@@ -176,7 +182,7 @@ timer_thread_main(void *unused)
 			if (hrtimer->function != NULL)
 				restart = hrtimer->function(hrtimer);
 			spin_lock(&timer_lock);
-			hrtimer->running = 0;
+			WRITE_ONCE(running_hrtimer, NULL);
 			if (restart == HRTIMER_RESTART && !hrtimer->queued) {
 				struct hrtimer *pos;
 				hrtimer->queued = 1;
@@ -256,7 +262,6 @@ timer_setup(struct timer_list *timer, void (*func)(struct timer_list *),
 	timer->function = func;
 	timer->flags = flags;
 	timer->queued = 0;
-	timer->running = 0;
 	timer->expires = 0;
 }
 
@@ -320,15 +325,8 @@ int
 timer_delete_sync(struct timer_list *timer)
 {
 	int was_pending = timer_delete(timer);
-	if (READ_ONCE(timer_thread) != NULL && current != timer_thread) {
-		wait_event(timer_callback_done, ({
-			int running;
-			spin_lock(&timer_lock);
-			running = timer->running;
-			spin_unlock(&timer_lock);
-			!running;
-		}));
-	}
+	if (READ_ONCE(timer_thread) != NULL && current != timer_thread)
+		wait_event(timer_callback_done, READ_ONCE(running_timer) != timer);
 	return was_pending;
 }
 
@@ -382,7 +380,7 @@ hrtimer_try_to_cancel(struct hrtimer *timer)
 	if (timer->entry.next == NULL)
 		return 0;
 	spin_lock(&timer_lock);
-	if (timer->running)
+	if (running_hrtimer == timer)
 		result = -1;
 	else if (timer->queued) {
 		list_del_init(&timer->entry);
@@ -404,8 +402,16 @@ hrtimer_cancel(struct hrtimer *timer)
 			return result;
 		if (current == timer_thread)
 			return 0;
-		wait_event(timer_callback_done, !READ_ONCE(timer->running));
+		wait_event(timer_callback_done,
+			READ_ONCE(running_hrtimer) != timer);
 	}
+}
+
+
+int
+lx_hrtimer_callback_running(const struct hrtimer *timer)
+{
+	return READ_ONCE(running_hrtimer) == timer;
 }
 
 
