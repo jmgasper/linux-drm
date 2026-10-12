@@ -6,8 +6,8 @@
 /*	Where the time goes when decoded pictures are read back: decodes an
 	H.264 or HEVC Annex B stream with libavcodec on VA-API and times, per
 	picture, vaSyncSurface, vaGetImage into an image of the surface's own
-	format, vaMapBuffer and reading the mapped image, and the same through
-	av_hwframe_transfer_data (what the amduvd add-on does).
+	format (one image kept for all pictures), vaMapBuffer and reading the
+	mapped image, and the same through av_hwframe_transfer_data.
 
 	vabench h264|hevc <stream> [pictures] */
 
@@ -69,12 +69,19 @@ measure(AVCodecContext* context, AVFrame* frame, AVFrame* software)
 			&& ((AVHWFramesContext*)frame->hw_frames_ctx->data)->sw_format
 				== AV_PIX_FMT_P010 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
 	}
-	VAImage image;
-	if (vaCreateImage(display, &format, frame->width, frame->height, &image)
-			!= VA_STATUS_SUCCESS) {
+	/* one image kept, as the amduvd add-on does (VABENCH_NEW_IMAGE=1: a new
+	   one per picture, as av_hwframe_transfer_data does) */
+	static VAImage image;
+	static int haveImage;
+	static int newImage = -1;
+	if (newImage < 0)
+		newImage = getenv("VABENCH_NEW_IMAGE") != NULL;
+	if (!haveImage && vaCreateImage(display, &format, frame->width,
+			frame->height, &image) != VA_STATUS_SUCCESS) {
 		fprintf(stderr, "vaCreateImage failed\n");
 		exit(1);
 	}
+	haveImage = 1;
 	double t2 = now_ms();
 	if (vaGetImage(display, surface, 0, 0, frame->width, frame->height,
 			image.image_id) != VA_STATUS_SUCCESS) {
@@ -91,7 +98,10 @@ measure(AVCodecContext* context, AVFrame* frame, AVFrame* software)
 	sChecksum += sum;
 	double t5 = now_ms();
 	vaUnmapBuffer(display, image.buf);
-	vaDestroyImage(display, image.image_id);
+	if (newImage) {
+		vaDestroyImage(display, image.image_id);
+		haveImage = 0;
+	}
 
 	av_frame_unref(software);
 	double t6 = now_ms();
