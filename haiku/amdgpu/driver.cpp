@@ -101,6 +101,12 @@ static const uint32 kDrmHaikuLabBench = LX_IOC(0, 'd', 0xfe, 0);
 static const uint32 kDrmHaikuLabPerfLevel = LX_IOC(0, 'd', 0xfd, 0);
 static void lab_unpin();
 #endif
+struct drm_haiku_wait_hotplug {
+	uint32	generation;
+	uint32	timeout_ms;
+};
+static const uint32 kDrmHaikuWaitHotplug = LX_IOC(3, 'd', 0xf3,
+	sizeof(drm_haiku_wait_hotplug));
 static const uint32 kDrmHaikuDeviceInfo = LX_IOC(2, 'd', 0xf2,
 	sizeof(drm_haiku_device_info));
 
@@ -414,6 +420,19 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
 			return B_BAD_ADDRESS;
 		return unmap_buffer(cookie, request.address);
+	}
+
+	if (op == kDrmHaikuWaitHotplug) {
+		drm_haiku_wait_hotplug request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		unsigned int generation = request.generation;
+		int error = lx_glue_wait_hotplug(&generation, request.timeout_ms);
+		request.generation = generation;
+		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return haiku_status(error);
 	}
 
 	if (op == kDrmHaikuDeviceInfo) {

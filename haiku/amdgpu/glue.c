@@ -24,6 +24,9 @@
 
 #include "glue.h"
 
+extern void (*lx_drm_hotplug_hook)(struct drm_device *dev);
+static void hotplug_event(struct drm_device *dev);
+
 #ifndef DRM_MAJOR
 #	define DRM_MAJOR 226
 #endif
@@ -126,6 +129,7 @@ lx_glue_init(void)
 	int error;
 
 	lx_cpu_init();
+	lx_drm_hotplug_hook = hotplug_event;
 	error = lx_workqueue_init();
 	if (error != 0)
 		return error;
@@ -490,6 +494,33 @@ lx_glue_lab_bench(void *_file)
 		sum == (u64)(readSize / 8) * (readSize / 8 - 1) / 2 ? "ok" : "WRONG");
 	amdgpu_bo_free_kernel(&bo, &gpuAddress, (void **)&cpu);
 	return 0;
+}
+
+
+/* #pragma mark - hot plugging */
+
+/* Linux sends a uevent when monitors come and go; here waiters see a
+ * generation count go up. */
+static atomic_t hotplug_generation = ATOMIC_INIT(1);
+static DECLARE_WAIT_QUEUE_HEAD(hotplug_wait);
+
+static void
+hotplug_event(struct drm_device *dev)
+{
+	atomic_inc(&hotplug_generation);
+	wake_up_all(&hotplug_wait);
+}
+
+
+int
+lx_glue_wait_hotplug(unsigned int *generation, unsigned int timeout_ms)
+{
+	unsigned int seen = *generation;
+	long r = wait_event_interruptible_timeout(hotplug_wait,
+		(unsigned int)atomic_read(&hotplug_generation) != seen,
+		msecs_to_jiffies(timeout_ms));
+	*generation = atomic_read(&hotplug_generation);
+	return r < 0 ? (int)r : 0;
 }
 
 
