@@ -587,6 +587,14 @@ init_driver(void)
 	}
 	put_module(B_PCI_MODULE_NAME);
 
+	if (gpus == 0) {
+		// nothing to drive: stop again, so that devfs unloads the driver
+		TRACE("no GPU started\n");
+		lx_glue_uninit();
+		sStarted = false;
+		return B_ENTRY_NOT_FOUND;
+	}
+
 	int minors[kMaxDevices];
 	int count = lx_glue_minors(minors, kMaxDevices);
 	for (int i = 0; i < count; i++) {

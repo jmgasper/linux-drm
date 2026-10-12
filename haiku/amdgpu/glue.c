@@ -163,6 +163,8 @@ lx_glue_probe(int bus, int device, int function)
 	error = driver->probe(pdev, id);
 	if (error != 0) {
 		pr_err("amdgpu: probing %s failed: %d\n", pci_name(pdev), error);
+		/* as Linux's driver core: what the probe left managed goes */
+		devres_release_all(&pdev->dev);
 		pdev->driver = NULL;
 		return error;
 	}
@@ -178,6 +180,7 @@ lx_glue_uninit(void)
 		struct pci_dev *pdev = probed[--probed_count];
 		if (pdev->driver != NULL && pdev->driver->remove != NULL)
 			pdev->driver->remove(pdev);
+		devres_release_all(&pdev->dev);
 		pdev->driver = NULL;
 	}
 	lx_module_exit_amdgpu_exit();

@@ -192,3 +192,24 @@ enable_irq(unsigned int irq)
 	if (__atomic_sub_fetch(&desc->disable_depth, 1, __ATOMIC_SEQ_CST) == 0)
 		lx_haiku_event_signal(desc->event);	/* catch up on lost ones */
 }
+
+
+struct irq_domain {
+	const struct irq_domain_ops *ops;
+	void *host_data;
+	unsigned int size;
+};
+
+
+struct irq_domain *
+lx_irq_domain_create(unsigned int size, const struct irq_domain_ops *ops,
+	void *host_data)
+{
+	struct irq_domain *domain = kzalloc(sizeof(*domain), GFP_KERNEL);
+	if (domain == NULL)
+		return NULL;
+	domain->ops = ops;
+	domain->host_data = host_data;
+	domain->size = size;
+	return domain;
+}

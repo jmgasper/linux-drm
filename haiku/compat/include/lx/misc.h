@@ -313,7 +313,8 @@ struct irq_chip;
 struct irq_data;
 #define irq_find_mapping(domain, hwirq)	0
 #define irq_create_mapping(domain, hwirq)	0
-#define irq_domain_remove(domain)	do { } while (0)
+#define irq_dispose_mapping(virq)	do { } while (0)
+#define irq_domain_remove(domain)	kfree(domain)
 #define generic_handle_irq(irq)	0
 #define generic_handle_domain_irq(domain, hwirq)	0
 #define mmu_notifier_synchronize()	do { } while (0)
@@ -837,8 +838,14 @@ struct irq_domain_ops {
 	int (*map)(struct irq_domain *d, unsigned int virq, irq_hw_number_t hw);
 	void (*unmap)(struct irq_domain *d, unsigned int virq);
 };
-#define irq_domain_create_linear(fwnode, size, ops, host_data)	((struct irq_domain *)NULL)
-#define irq_domain_add_linear(of_node, size, ops, host_data)	((struct irq_domain *)NULL)
+/*	amdgpu's own domain feeds its ACP and ISP children, which Haiku does not
+	have: the domain exists, its interrupts never fire. */
+struct irq_domain *lx_irq_domain_create(unsigned int size,
+	const struct irq_domain_ops *ops, void *host_data);
+#define irq_domain_create_linear(fwnode, size, ops, host_data) \
+	lx_irq_domain_create(size, ops, host_data)
+#define irq_domain_add_linear(of_node, size, ops, host_data) \
+	lx_irq_domain_create(size, ops, host_data)
 #define irq_set_chip_and_handler(irq, chip, handle)	do { } while (0)
 #define handle_simple_irq	NULL
 #define irq_to_desc(irq)	NULL
