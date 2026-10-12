@@ -82,6 +82,10 @@ typedef unsigned int drm_handle_t;
 #define _IOC_NONE	0U
 #define _IOC_WRITE	1U
 #define _IOC_READ	2U
+#define _IOC_DIR(nr)	(((nr) >> _IOC_DIRSHIFT) & _IOC_DIRMASK)
+#define _IOC_TYPE(nr)	(((nr) >> _IOC_TYPESHIFT) & _IOC_TYPEMASK)
+#define _IOC_NR(nr)	(((nr) >> _IOC_NRSHIFT) & _IOC_NRMASK)
+#define _IOC_SIZE(nr)	(((nr) >> _IOC_SIZESHIFT) & _IOC_SIZEMASK)
 #endif
 #undef _IOC
 #undef _IO
