@@ -49,6 +49,10 @@
 #define CONFIG_DRM_AMDGPU 1
 #define CONFIG_DRM_AMDGPU_SI 1
 #define CONFIG_DRM_AMDGPU_CIK 1
+/* Haiku's radeon_hd is the radeon driver here: as on Linux with radeon
+ * built, Southern and Sea Islands GPUs are left to it unless amdgpu_drm's
+ * settings say "si_support 1" or "cik_support 1" (only amdgpu_drv.c looks) */
+#define CONFIG_DRM_RADEON_MODULE 1
 #define CONFIG_DRM_AMD_DC 1
 #define CONFIG_DRM_AMD_DC_FP 1
 #define CONFIG_DRM_AMD_DC_SI 1

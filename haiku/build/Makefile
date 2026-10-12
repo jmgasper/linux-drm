@@ -6,8 +6,10 @@
 # HAIKU_TOP provides the kernel headers, HAIKU_BUILD the cross compiler (as
 # configured there), kernel.so to link against and the generated headers.
 # For a Haiku release (R1/beta6): HAIKU_TOP=<headers of the release's commit>
-# HAIKU_KERNEL=<the release's kernel_x86_64> OUT=<dir of its own>; the
-# release's kernel is not a KDEBUG one, and its headers say so.
+# HAIKU_KERNEL=<develop/lib/_KERNEL_ of the release's haiku_devel>
+# HAIKU_VERSION_GLUE=<develop/lib/haiku_version_glue.o of it> OUT=<dir of its
+# own> (haiku/tools/build-release.sh); the release's kernel is not a KDEBUG
+# one, and its headers say so.
 # Targets: all (the add-on), core / amdgpu / compat (object groups),
 # check FILE=<file> (compile one Linux file, e.g. FILE=drivers/dma-buf/dma-fence.c).
 
@@ -30,6 +32,7 @@ HAIKU_OBJ := $(HAIKU_BUILD)/objects/haiku/x86_64/release
 # the kernel the add-on links against; for a Haiku release, that release's
 # kernel_x86_64 (with HAIKU_TOP at its commit, for its headers)
 HAIKU_KERNEL ?= $(HAIKU_OBJ)/system/kernel/kernel.so
+HAIKU_VERSION_GLUE ?= $(HAIKU_OBJ)/system/glue/haiku_version_glue.o
 GCC_SYSLIBS := $(firstword $(wildcard $(HAIKU_BUILD)/build_packages/gcc_syslibs_devel-*))
 
 ADDON := $(OUT)/amdgpu_drm
@@ -166,7 +169,7 @@ $(ADDON): $(ALL_OBJS)
 	@echo "  LD   $@"
 	@$(LD) -o $@ -z max-page-size=0x1000 -shared --no-undefined -Bsymbolic \
 		$(GCCLIB)crtbeginS.o $(ALL_OBJS) $(HAIKU_KERNEL) \
-		$(HAIKU_OBJ)/system/glue/haiku_version_glue.o $(GCCLIB)libgcc.a \
+		$(HAIKU_VERSION_GLUE) $(GCCLIB)libgcc.a \
 		$(GCCLIB)crtendS.o
 
 clean:
