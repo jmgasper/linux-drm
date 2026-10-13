@@ -93,9 +93,11 @@ drm_devices(struct drm_device **devices, int max)
 
 static int haiku_console_test;
 static void lx_glue_console_test(void);
+static void lx_glue_console_moved(void);
 /* the kernel debugger's console, see lx_glue_update_debug_console() */
 static void *console_base;
 static int console_width, console_height, console_pitch;
+static struct drm_device *console_device;
 
 int
 lx_glue_set_param(const char *name, const char *value)
@@ -129,6 +131,8 @@ lx_glue_set_param(const char *name, const char *value)
 		if (error == 0 && strcmp(name, "haiku_console_test") == 0
 			&& haiku_console_test)
 			lx_glue_console_test();
+		if (error == 0 && strcmp(name, "haiku_console_connector") == 0)
+			lx_glue_console_moved();
 		return error;
 	}
 	pr_info("amdgpu: no parameter %s\n", name);
@@ -337,6 +341,7 @@ lx_glue_uninit(void)
 		lx_haiku_debug_console(NULL, 0, 0, 0);
 		console_base = NULL;
 	}
+	console_device = NULL;
 	lx_glue_fake_device_stop();
 	while (probed_count > 0) {
 		struct pci_dev *pdev = probed[--probed_count];
@@ -477,6 +482,12 @@ lx_glue_close(void *file)
  * address the kernel turns down. So after every mode set, the part of a frame
  * buffer the screen at the desktop's top left shows becomes the console,
  * through amdgpu's kernel mapping of the visible VRAM. */
+/* "haiku_console_connector DP-2" (settings or drmparam) puts the console on
+ * that connector's screen, e.g. one a KVM captures, instead of the one at the
+ * desktop's top left */
+static char *haiku_console_connector;
+module_param(haiku_console_connector, charp, 0644);
+
 /* lab aid: "haiku_console_test 1" (drmparam) paints a mark where the
  * console is, to check that it is on screen */
 static int haiku_console_test;
@@ -494,6 +505,7 @@ lx_glue_update_debug_console(struct drm_device *dev)
 
 	if (adev->mman.aper_base_kaddr == NULL)
 		return;
+	console_device = dev;
 	drm_modeset_acquire_init(&ctx, 0);
 retry:
 	ret = drm_modeset_lock_all_ctx(dev, &ctx);
@@ -530,6 +542,19 @@ retry:
 					+ (u64)w * 4 > adev->gmc.visible_vram_size)
 				continue;
 			distance = x + y;
+			if (haiku_console_connector != NULL && haiku_console_connector[0]) {
+				/* the named connector's screen comes first */
+				struct drm_connector *connector;
+				struct drm_connector_list_iter iter;
+				drm_connector_list_iter_begin(dev, &iter);
+				drm_for_each_connector_iter(connector, &iter) {
+					if (connector->state != NULL
+						&& connector->state->crtc == state->crtc
+						&& strcmp(connector->name, haiku_console_connector) == 0)
+						distance = -1;
+				}
+				drm_connector_list_iter_end(&iter);
+			}
 			if (distance >= best)
 				continue;
 			best = distance;
@@ -551,6 +576,16 @@ retry:
 	}
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
+}
+
+
+/* a changed haiku_console_connector is applied at once, on the device the
+ * console was last set up for */
+static void
+lx_glue_console_moved(void)
+{
+	if (console_device != NULL)
+		lx_glue_update_debug_console(console_device);
 }
 
 
