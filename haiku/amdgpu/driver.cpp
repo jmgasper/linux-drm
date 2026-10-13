@@ -64,9 +64,16 @@ __asm__(".type register_shutdown_hook, @function\n"
 #define DRIVER_NAME "amdgpu_drm"
 #define TRACE(x...) dprintf(DRIVER_NAME ": " x)
 
+// the synced log file (log_file), and the syslog
+extern "C" void lx_haiku_log(const char* text);
+extern "C" void lx_trace_calls_start_stop(void);
+extern "C" int64 lx_haiku_log_position(void);
+extern "C" int lx_haiku_raw_log_prepare(void);
+extern "C" void lx_haiku_raw_log_start(int32 thread);
+extern "C" void lx_haiku_raw_log_end(void);
+
 #ifdef AMDGPU_DRM_ARMED_ONLY
 // lab builds: steps that may stop the machine go to the synced log file too
-extern "C" void lx_haiku_log(const char* text);
 extern "C" void lx_trace_calls_start(void);
 #	define LAB_LOG(x...) \
 	do { \
@@ -1034,6 +1041,35 @@ is_amd_gpu(const pci_info& info)
 }
 
 
+/*	Makes the marker and arm file changes durable. init_driver() and
+	uninit_driver() run in devfs' driver lock, and uninit_driver() waits for
+	the stable timer's thread. A sync waits for every volume, network ones
+	(userlandfs: smbfs) too, and their mounting may wait for devfs (net_server
+	opening a network device); the X399 stopped in such a sync when devfs
+	reloaded the driver early in a boot. So the sync runs in a thread of its
+	own that is waited for a few seconds at most, and that runs kernel code
+	only (_kern_sync() itself, which ignores the argument): this add-on may
+	be unloaded before it ends. The boot volume is synced before any network
+	volume, and BFS writes its log after two idle seconds anyway. */
+static void
+sync_volumes()
+{
+	thread_id thread = spawn_kernel_thread((thread_func)(void*)&_kern_sync,
+		DRIVER_NAME " sync", B_NORMAL_PRIORITY, NULL);
+	if (thread < 0) {
+		TRACE("cannot sync: %s\n", strerror(thread));
+		return;
+	}
+	resume_thread(thread);
+	status_t result;
+	if (wait_for_thread_etc(thread, B_RELATIVE_TIMEOUT, 3000000, &result)
+			== B_TIMED_OUT) {
+		lx_haiku_log(DRIVER_NAME ": the sync takes long (a network volume?); "
+			"not waiting for it\n");
+	}
+}
+
+
 /*	Lab builds (AMDGPU_DRM_ARMED_ONLY) start only when the arm file was made
 	during this boot: devfs may reload the driver any number of times in the
 	boot it was armed in, but a start that brought the machine down cannot
@@ -1053,7 +1089,7 @@ armed_for_this_boot()
 	if (st.st_mtime + 5 >= bootTime)
 		return true;
 	_kern_unlink(-1, kArmFile);
-	_kern_sync();
+	sync_volumes();
 	return false;
 }
 #endif
@@ -1065,7 +1101,12 @@ armed_for_this_boot()
 	has none that works). A marker file exists from the start until the GPU
 	has run for half a minute; finding it means that the last start did not
 	get that far, and the driver stays off (the framebuffer driver drives the
-	display) until the marker is deleted. */
+	display) until the marker is deleted.
+	Only a marker of an earlier boot counts: devfs may unload the driver and
+	start it again in the same boot (when its binary changed), and the
+	stopping driver leaves the marker alone, since it must not touch the
+	file system then (see sync_volumes()). The next start keeps it, and its
+	stable timer deletes it. */
 static const char* kStartMarker
 	= "/boot/home/config/settings/kernel/drivers/amdgpu_drm.starting";
 static const bigtime_t kStableAfter = 30000000;
@@ -1074,16 +1115,29 @@ static thread_id sStableThread = -1;
 
 
 static bool
+marked_this_boot(const struct stat& st)
+{
+	time_t bootTime = real_time_clock() - system_time() / 1000000;
+	return st.st_mtime + 5 >= bootTime;
+}
+
+
+static bool
 previous_start_failed()
 {
 	struct stat st;
-	return stat(kStartMarker, &st) == 0;
+	return stat(kStartMarker, &st) == 0 && !marked_this_boot(st);
 }
 
 
 static void
 mark_start()
 {
+	struct stat st;
+	if (stat(kStartMarker, &st) == 0 && marked_this_boot(st)) {
+		// an earlier start of this boot made it, and it stays
+		return;
+	}
 	int fd = _kern_open(-1, kStartMarker, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0) {
 		// a read-only boot volume: no protection, but no harm either
@@ -1095,7 +1149,7 @@ mark_start()
 	_kern_write(fd, 0, kText, sizeof(kText) - 1);
 	_kern_fsync(fd, false);
 	_kern_close(fd);
-	_kern_sync();
+	sync_volumes();
 }
 
 
@@ -1106,7 +1160,7 @@ stable_thread(void*)
 	if (acquire_sem_etc(sStableSem, 1, B_RELATIVE_TIMEOUT, kStableAfter)
 			== B_TIMED_OUT) {
 		_kern_unlink(-1, kStartMarker);
-		_kern_sync();
+		sync_volumes();
 		TRACE("running stably\n");
 	}
 	return B_OK;
@@ -1143,27 +1197,43 @@ stop_stable_timer()
 #endif
 
 
-#ifdef AMDGPU_DRM_ARMED_ONLY
-/*	devfs reloads a driver none of whose devices is open whenever a file
-	system event marks its binary as changed, and the lab's installation and
-	arming cause such events. Like app_server would, keep a device open. */
+/*	devfs reloads a driver none of whose devices is open once it takes its
+	binary for changed: after a file system event in the drivers'
+	directories, and also when it scans a directory that links the same
+	binary again (amdgpu_drm was linked from dev/dri too, and the first open
+	of a /dev/dri path scanned it). A reload stops the GPU and starts it
+	again, in devfs' driver lock; on the X399 the stop panicked or froze the
+	machine (AMDGPU-DRM.md). Like app_server, keep a device open for as long
+	as the GPU runs: devfs then never reloads the driver, and a changed
+	binary starts at the next boot. Only the moment before this thread has
+	the device open is left (a stop then would unload the driver under the
+	thread). The render node: the first opener of card0 becomes DRM master,
+	which is for app_server's accelerant to be. */
 static int sPinFile = -1;
 
 static status_t
 pin_thread(void*)
 {
-	snooze(200000);
-	// the render node: the first opener of card0 becomes DRM master, which
-	// is for app_server's accelerant to be
-	int fd = _kern_open(-1, "/dev/dri/renderD128", O_RDWR, 0);
-	if (fd < 0)
-		TRACE("could not keep /dev/dri/renderD128 open: %s\n", strerror(fd));
-	else
-		sPinFile = fd;
+	// devfs publishes the devices once init_driver() returned
+	int fd = B_ENTRY_NOT_FOUND;
+	for (int attempt = 0; attempt < 500; attempt++) {
+		fd = _kern_open(-1, "/dev/dri/renderD128", O_RDWR, 0);
+		if (fd >= 0 || fd != B_ENTRY_NOT_FOUND)
+			break;
+		snooze(20000);
+	}
+	if (fd < 0) {
+		TRACE("cannot keep /dev/dri/renderD128 open: %s\n", strerror(fd));
+		return B_OK;
+	}
+	sPinFile = fd;
+	TRACE("keeping /dev/dri/renderD128 open: devfs does not reload a running "
+		"GPU's driver\n");
 	return B_OK;
 }
 
 
+#ifdef AMDGPU_DRM_ARMED_ONLY
 static status_t
 unpin_thread(void*)
 {
@@ -1226,6 +1296,28 @@ shutdown_gpus(bool reboot, void* cookie)
 }
 
 
+static void start_watch();
+
+
+#ifndef AMDGPU_DRM_ARMED_ONLY
+/*	devfs' kernel daemon loads a driver whose binary changed while the
+	system runs (an installation, a package activated). If app_server runs
+	already, it drives the screens through another driver then (the
+	framebuffer driver: this one was not running), and starting the GPU
+	underneath it would be two drivers on one GPU: the GPU starts at the
+	next boot instead. At a boot, app_server's own search for displays loads
+	the driver. */
+static bool
+desktop_runs_on_another_driver()
+{
+	thread_info info;
+	return get_thread_info(find_thread(NULL), &info) == B_OK
+		&& strcmp(info.name, "kernel daemon") == 0
+		&& find_thread("app_server") >= 0;
+}
+#endif
+
+
 status_t
 init_driver(void)
 {
@@ -1239,6 +1331,11 @@ init_driver(void)
 	if (previous_start_failed()) {
 		dprintf(DRIVER_NAME ": the last start did not finish (%s exists); not "
 			"starting\n", kStartMarker);
+		return B_ERROR;
+	}
+	if (desktop_runs_on_another_driver()) {
+		dprintf(DRIVER_NAME ": installed while app_server drives the screens "
+			"through another driver; the GPU starts at the next boot\n");
 		return B_ERROR;
 	}
 #endif
@@ -1285,12 +1382,14 @@ init_driver(void)
 		if (!marked) {
 			mark_start();
 			marked = true;
+			lx_haiku_log(DRIVER_NAME ": starting: marker made\n");
 		}
 #endif
 		if (lx_glue_probe(info.bus, info.device, info.function) == 0)
 			gpus++;
 	}
 	put_module(B_PCI_MODULE_NAME);
+	lx_haiku_log(DRIVER_NAME ": starting: probed\n");
 
 	if (gpus == 0) {
 		// nothing to drive: stop again, so that devfs unloads the driver
@@ -1299,9 +1398,9 @@ init_driver(void)
 		sStarted = false;
 #ifndef AMDGPU_DRM_ARMED_ONLY
 		if (marked) {
-			// it failed, but it did not bring the machine down
+			// it failed, but it did not bring the machine down; no sync after
+			// the GPU was touched (BFS writes its log after two idle seconds)
 			_kern_unlink(-1, kStartMarker);
-			_kern_sync();
 		}
 #endif
 		return B_ENTRY_NOT_FOUND;
@@ -1333,38 +1432,108 @@ init_driver(void)
 		&& register_shutdown_hook(&shutdown_gpus, NULL) == B_OK) {
 		sShutdownHookRegistered = true;
 	}
-#ifdef AMDGPU_DRM_ARMED_ONLY
 	// after publish_devices(), which follows init_driver()
 	thread_id pin = spawn_kernel_thread(pin_thread, "amdgpu_drm pin",
 		B_NORMAL_PRIORITY, NULL);
 	if (pin >= 0)
 		resume_thread(pin);
-#else
+#ifndef AMDGPU_DRM_ARMED_ONLY
 	start_stable_timer();
 #endif
+	start_watch();
 	return B_OK;
+}
+
+
+/*	Lab aid, with a log file only (log_file): from the end of the start
+	until the driver stops (or two minutes have passed), this thread writes
+	a line a second around the file system (lx_haiku_raw_log_prepare()), and
+	then while the log file has not grown for five seconds: the last line
+	dates a freeze of the whole machine, which leaves no other trace on the
+	lab X399. A panic shows in kdl_capture's file instead (the Haiku tree's
+	src/add-ons/kernel/debugger/kdl_capture). */
+static sem_id sWatchSem = -1;
+static thread_id sWatchThread = -1;
+
+static status_t
+watch_thread(void*)
+{
+	lx_haiku_raw_log_start(find_thread(NULL));
+	int64 position = lx_haiku_log_position();
+	bigtime_t progress = system_time();
+	for (int seconds = 0; acquire_sem_etc(sWatchSem, 1, B_RELATIVE_TIMEOUT,
+			1000000) == B_TIMED_OUT; seconds++) {
+		bigtime_t now = system_time();
+		int64 at = lx_haiku_log_position();
+		if (at != position) {
+			position = at;
+			progress = now;
+		}
+		bool stalled = now - progress >= 5000000;
+		if (seconds < 120 || stalled) {
+			char line[96];
+			snprintf(line, sizeof(line), DRIVER_NAME ": watch: log at %" B_PRId64
+				"%s\n", at, stalled ? ", no progress" : "");
+			lx_haiku_log(line);
+		}
+	}
+	return B_OK;
+}
+
+
+static void
+start_watch()
+{
+	if (lx_haiku_raw_log_prepare() != 0)
+		return;
+	sWatchSem = create_sem(0, DRIVER_NAME " watch");
+	if (sWatchSem < 0)
+		return;
+	sWatchThread = spawn_kernel_thread(watch_thread, DRIVER_NAME " watch",
+		B_URGENT_DISPLAY_PRIORITY, NULL);
+	if (sWatchThread >= 0)
+		resume_thread(sWatchThread);
+}
+
+
+static void
+end_watch()
+{
+	if (sWatchSem >= 0) {
+		release_sem(sWatchSem);
+		if (sWatchThread >= 0) {
+			status_t result;
+			wait_for_thread(sWatchThread, &result);
+			sWatchThread = -1;
+		}
+		delete_sem(sWatchSem);
+		sWatchSem = -1;
+	}
+	lx_haiku_raw_log_end();
 }
 
 
 void
 uninit_driver(void)
 {
+	// devfs unloads the driver in its driver lock, when none of its devices
+	// is open (see pin_thread()): no file system work here (see
+	// sync_volumes()); the log file has the steps.
+	lx_haiku_log(DRIVER_NAME ": uninit_driver\n");
+	lx_trace_calls_start_stop();
 	if (sShutdownHookRegistered) {
 		unregister_shutdown_hook(&shutdown_gpus, NULL);
 		sShutdownHookRegistered = false;
 	}
-#ifdef AMDGPU_DRM_ARMED_ONLY
+	// unpinned already (devfs unloads no driver with an open device), or
+	// never pinned (a start that failed)
 	if (sPinFile >= 0) {
 		_kern_close(sPinFile);
 		sPinFile = -1;
 	}
-#else
+#ifndef AMDGPU_DRM_ARMED_ONLY
+	// a start marker stays (see previous_start_failed())
 	stop_stable_timer();
-	if (sStarted) {
-		// an orderly stop: the start did not bring the machine down
-		_kern_unlink(-1, kStartMarker);
-		_kern_sync();
-	}
 #endif
 	for (int i = 0; i < sDeviceCount; i++)
 		free(sDeviceNames[i]);
@@ -1372,6 +1541,9 @@ uninit_driver(void)
 	if (sStarted)
 		lx_glue_uninit();
 	sStarted = false;
+	end_watch();
+	// the log file is closed now: the syslog only
+	TRACE("uninit_driver: done\n");
 }
 
 

@@ -4,8 +4,11 @@
 #
 #   haiku/tools/x399-install.sh [accelerant]
 #
+# AMDGPU_DRM_BIN names another release-configured build than out-release's
+# (a call trace build, say).
+#
 # - the driver (out-release/amdgpu_drm) as bin/amdgpu_drm in the user's
-#   non-packaged drivers, linked from dev/dri and dev/graphics;
+#   non-packaged drivers, linked from dev/graphics only (see package.sh);
 # - an accelerant, if one is given, in the user's non-packaged accelerants
 #   (to try one out); without one the system's amdgpu_kms.accelerant (in
 #   haiku.hpkg since the Haiku fork's 7c06a1f7c3) is used and a user copy
@@ -22,7 +25,13 @@
 # 30 s: if a start brings the machine down, the next boot finds the marker
 # and leaves the GPU to the framebuffer driver until it is deleted
 # (~/config/settings/kernel/drivers/amdgpu_drm.starting).
-# Takes effect at the next (cold) boot.
+# Takes effect at the next (cold) boot: a running build keeps one of its
+# devices open (pin_thread() in driver.cpp), so devfs does not reload it
+# when its binary changes, and the new build replaces it in place. An older
+# running build without that is replaced at the next boot by the boot job
+# x399-driver-safety instead - whose swap devfs may handle after it loaded
+# the new build already, reloading the started GPU, which has stopped the
+# machine (AMDGPU-DRM.md).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CONFIG=/mnt/HaikuWork/x399/ssh/config
@@ -30,7 +39,7 @@ SSH="ssh -F $CONFIG -o ConnectTimeout=10 ws-haiku"
 NP=/boot/home/config/non-packaged
 DRV=$NP/add-ons/kernel/drivers
 SETTINGS=/boot/home/config/settings/kernel/drivers
-BIN=$ROOT/out-release/amdgpu_drm
+BIN=${AMDGPU_DRM_BIN:-$ROOT/out-release/amdgpu_drm}
 ACCELERANT=${1:-}
 
 if ! grep -aq amdgpu_drm.starting "$BIN" || grep -aq amdgpu_drm.arm "$BIN"; then
@@ -46,31 +55,31 @@ $SSH "listimage 1 2>/dev/null | grep -q amdgpu_drm" && loaded=1
 
 # Uploaded outside the drivers' directories: devfs takes any new file in
 # them for a driver and starts it, and a second amdgpu on the same GPU
-# brings the machine down. Nor may the binary of a loaded driver be
-# replaced (devfs reloads it underneath itself): then the boot job
-# x399-driver-safety swaps it in at the next boot, before app_server.
+# brings the machine down. Then moved over the binary, unless a running
+# build would be reloaded by that (see above).
 STAGE=/boot/home/amdgpu-drm/amdgpu_drm.new
 SWAP=
 if [ "$local" = "$installed" ]; then
 	echo "amdgpu_drm $local is installed already"
 else
-	$SSH "mkdir -p $DRV/bin $DRV/dev/dri $DRV/dev/graphics /boot/home/amdgpu-drm \
+	$SSH "mkdir -p $DRV/bin $DRV/dev/graphics /boot/home/amdgpu-drm \
 		&& cat > $STAGE && chmod 755 $STAGE && sync" < "$BIN"
 	[ "$($SSH "sha256sum $STAGE" | cut -d' ' -f1)" = "$local" ] \
 		|| { echo "upload damaged" >&2; exit 1; }
-	if [ $loaded = 1 ]; then
-		echo "amdgpu_drm is loaded: the new build is swapped in at the next boot" >&2
+	if [ $loaded = 1 ] && ! $SSH "grep -aq 'keeping /dev/dri/renderD128 open' $DRV/bin/amdgpu_drm"; then
+		echo "the running amdgpu_drm does not keep a device open: the new build is swapped in at the next boot, which may stop the machine (AMDGPU-DRM.md)" >&2
 	else
 		SWAP="mv -f $STAGE $DRV/bin/amdgpu_drm"
+		[ $loaded = 1 ] && echo "amdgpu_drm is loaded and keeps a device open: the new build starts at the next boot" >&2
 	fi
 fi
 $SSH "set -e
 	$SWAP
 	# a link made again is an entry removed and created for devfs
-	for d in dri graphics; do
-		[ \"\$(readlink $DRV/dev/\$d/amdgpu_drm)\" = ../../bin/amdgpu_drm ] \\
-			|| ln -sf ../../bin/amdgpu_drm $DRV/dev/\$d/amdgpu_drm
-	done
+	[ \"\$(readlink $DRV/dev/graphics/amdgpu_drm)\" = ../../bin/amdgpu_drm ] \\
+		|| ln -sf ../../bin/amdgpu_drm $DRV/dev/graphics/amdgpu_drm
+	# a second link makes devfs reload the running driver (package.sh)
+	rm -f $DRV/dev/dri/amdgpu_drm
 	if [ -n '$ACCELERANT' ]; then
 		mkdir -p $NP/add-ons/accelerants
 		cp -f '$ACCELERANT' $NP/add-ons/accelerants/amdgpu_kms.accelerant

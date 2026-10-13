@@ -119,12 +119,11 @@ driverVersion="$linuxVersion~git$stamp"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/add-ons/kernel/drivers/bin" \
-	"$STAGE/add-ons/kernel/drivers/dev/graphics" \
-	"$STAGE/add-ons/kernel/drivers/dev/dri" "$STAGE/add-ons/accelerants" \
+	"$STAGE/add-ons/kernel/drivers/dev/graphics" "$STAGE/add-ons/accelerants" \
 	"$STAGE/documentation/packages/amdgpu_drm"
 install -m 755 "$DRIVER" "$STAGE/add-ons/kernel/drivers/bin/amdgpu_drm"
+# one link only (see package.sh)
 ln -s ../../bin/amdgpu_drm "$STAGE/add-ons/kernel/drivers/dev/graphics/amdgpu_drm"
-ln -s ../../bin/amdgpu_drm "$STAGE/add-ons/kernel/drivers/dev/dri/amdgpu_drm"
 install -m 755 "$ACCELERANT" "$STAGE/add-ons/accelerants/amdgpu_kms.accelerant"
 cat > "$STAGE/documentation/packages/amdgpu_drm/README" <<EOF
 amdgpu_drm $driverVersion (linux-drm $commit) for Haiku $VERSION: Linux

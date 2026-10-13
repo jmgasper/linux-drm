@@ -7,8 +7,8 @@
 #       for Southern Islands to RDNA 4, APUs included); replaces the WX 5100
 #       trials' amdgpu_polaris10_firmware
 #   amdgpu_drm-<version>-1-x86_64.hpkg     the driver (a release build, out-
-#       release/amdgpu_drm) as bin/amdgpu_drm, published in dev/graphics and
-#       dev/dri; requires the firmware and the haiku package it was built
+#       release/amdgpu_drm) as bin/amdgpu_drm, linked from dev/graphics only
+#       (see below); requires the firmware and the haiku package it was built
 #       against. On an image that still has the native amdgpu driver, its
 #       post-install script blocks that driver and its amduvd decoder
 #       (/boot/system/settings/packages): two drivers must never start the
@@ -122,12 +122,14 @@ driverVersion="$linuxVersion~git$stamp"
 drv=$STAGE/driver
 mkdir -p "$drv/add-ons/kernel/drivers/bin" \
 	"$drv/add-ons/kernel/drivers/dev/graphics" \
-	"$drv/add-ons/kernel/drivers/dev/dri" \
 	"$drv/boot/post-install" "$drv/documentation/packages/amdgpu_drm"
 cp "$BIN" "$drv/add-ons/kernel/drivers/bin/amdgpu_drm"
 chmod 755 "$drv/add-ons/kernel/drivers/bin/amdgpu_drm"
+# One link: devfs takes the same binary found in a second directory for a
+# changed one, and reloads the running GPU's driver when it scans that
+# directory (AMDGPU-DRM.md). The driver publishes dri/card<n> and
+# dri/renderD<n> itself; app_server's search of /dev/graphics loads it.
 ln -s ../../bin/amdgpu_drm "$drv/add-ons/kernel/drivers/dev/graphics/amdgpu_drm"
-ln -s ../../bin/amdgpu_drm "$drv/add-ons/kernel/drivers/dev/dri/amdgpu_drm"
 cat > "$drv/boot/post-install/amdgpu_drm-block-native.sh" <<'EOF'
 #!/bin/sh
 # amdgpu_drm drives AMD GPUs: an image that still has the native amdgpu
