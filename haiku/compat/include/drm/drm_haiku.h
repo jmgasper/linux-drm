@@ -70,4 +70,36 @@ struct drm_haiku_wait_hotplug {
 
 #define DRM_HAIKU_IOCTL_WAIT_HOTPLUG	DRM_IOWR(0xf3, struct drm_haiku_wait_hotplug)
 
+/*	What writing "detect", "off" or "on" to a connector's status in sysfs does
+	on Linux: forces the connector disconnected or connected, or lets the
+	hardware say again; a change is a hot plug event. Primary nodes only. */
+struct drm_haiku_force_connector {
+	__u32 connector_id;
+	__u32 force;		/* 0 detect, 1 off, 2 on */
+};
+
+#define DRM_HAIKU_IOCTL_FORCE_CONNECTOR	DRM_IOW(0xf4, struct drm_haiku_force_connector)
+
+/*	What writing /sys/module/<module>/parameters/<name> does on Linux: sets
+	one of the driver's module parameters (amdgpu's and drm's, as in its
+	settings file), which counts where Linux looks at it again; drm's "debug"
+	is. Primary nodes only. */
+struct drm_haiku_set_param {
+	char name[64];
+	char value[64];
+};
+
+#define DRM_HAIKU_IOCTL_SET_PARAM	DRM_IOW(0xf5, struct drm_haiku_set_param)
+
+/*	The built-in panel's backlight (what Linux has in /sys/class/backlight):
+	sets \a brightness (0 to max_brightness) unless it is negative, and
+	returns the level and the maximum. Primary nodes only; ENODEV without a
+	panel backlight. */
+struct drm_haiku_backlight {
+	__s32 brightness;		/* in: the new level, or -1; out: the level */
+	__u32 max_brightness;	/* out */
+};
+
+#define DRM_HAIKU_IOCTL_BACKLIGHT	DRM_IOWR(0xf6, struct drm_haiku_backlight)
+
 #endif /* _DRM_HAIKU_H */

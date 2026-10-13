@@ -338,3 +338,45 @@ void
 amdgpu_xcp_drv_release(void)
 {
 }
+
+
+/* #pragma mark - backlight */
+
+
+struct backlight_device *
+backlight_device_register(const char *name, struct device *parent,
+	void *devdata, const struct backlight_ops *ops,
+	const struct backlight_properties *props)
+{
+	struct backlight_device *bd = kzalloc(sizeof(*bd), GFP_KERNEL);
+	if (bd == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	bd->ops = ops;
+	if (props != NULL)
+		bd->props = *props;
+	bd->dev.parent = parent;
+	dev_set_drvdata(&bd->dev, devdata);
+	pr_info("backlight %s: brightness %d of %d\n", name,
+		bd->props.brightness, bd->props.max_brightness);
+	return bd;
+}
+
+
+void
+backlight_device_unregister(struct backlight_device *bd)
+{
+	if (!IS_ERR_OR_NULL(bd))
+		kfree(bd);
+}
+
+
+int
+backlight_device_set_brightness(struct backlight_device *bd,
+	unsigned long brightness)
+{
+	if (brightness > (unsigned long)bd->props.max_brightness)
+		return -EINVAL;
+	bd->props.brightness = brightness;
+	return backlight_update_status(bd);
+}

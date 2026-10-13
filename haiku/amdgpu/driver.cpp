@@ -125,6 +125,12 @@ struct drm_haiku_set_param {
 };
 static const uint32 kDrmHaikuSetParam = LX_IOC(1, 'd', 0xf5,
 	sizeof(drm_haiku_set_param));
+struct drm_haiku_backlight {
+	int32	brightness;		// in: the new level, or -1; out: the level
+	uint32	max_brightness;	// out
+};
+static const uint32 kDrmHaikuBacklight = LX_IOC(3, 'd', 0xf6,
+	sizeof(drm_haiku_backlight));
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -777,6 +783,26 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 		request.name[sizeof(request.name) - 1] = '\0';
 		request.value[sizeof(request.value) - 1] = '\0';
 		return haiku_status(lx_glue_set_param(request.name, request.value));
+	}
+
+	if (op == kDrmHaikuBacklight) {
+		// the panel's, which the display (primary) node owns
+		if (cookie->minor >= 128)
+			return B_NOT_ALLOWED;
+		drm_haiku_backlight request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		int current, maximum;
+		int error = lx_glue_backlight(cookie->file, request.brightness,
+			&current, &maximum);
+		if (error != 0)
+			return haiku_status(error);
+		request.brightness = current;
+		request.max_brightness = maximum;
+		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
 	}
 
 	if (op == kDrmHaikuDeviceInfo) {

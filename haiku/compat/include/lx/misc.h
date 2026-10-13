@@ -655,13 +655,22 @@ struct backlight_device {
 #define BL_CORE_SUSPENDED	(1 << 0)
 #define BL_CORE_FBBLANK		(1 << 1)
 #define BL_CORE_SUSPENDRESUME	(1 << 0)
-#define backlight_device_register(name, dev, data, ops, props) \
-	ERR_PTR(-ENODEV)
-#define backlight_device_unregister(bd)	do { } while (0)
+/* registered for real: DRM_HAIKU_IOCTL_BACKLIGHT sets the brightness the
+   way writing it in sysfs does (compat/src/misc.c) */
+struct backlight_device *backlight_device_register(const char *name,
+	struct device *parent, void *devdata, const struct backlight_ops *ops,
+	const struct backlight_properties *props);
+void backlight_device_unregister(struct backlight_device *bd);
+int backlight_device_set_brightness(struct backlight_device *bd,
+	unsigned long brightness);
 #define backlight_get_brightness(bd)	((bd)->props.brightness)
 #define bl_get_data(bd)		dev_get_drvdata(&(bd)->dev)
-#define backlight_update_status(bd)	0
-#define backlight_device_set_brightness(bd, b)	0
+static inline int
+backlight_update_status(struct backlight_device *bd)
+{
+	return bd->ops != NULL && bd->ops->update_status != NULL
+		? bd->ops->update_status(bd) : -ENXIO;
+}
 #define backlight_is_blank(bd)	false
 
 /* hwmon, power supply, thermal */

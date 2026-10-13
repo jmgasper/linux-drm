@@ -1903,3 +1903,28 @@ lx_glue_fake_device_stop(void)
 	drm_dev_put(fake_drm);
 	fake_drm = NULL;
 }
+
+
+/* DRM_HAIKU_IOCTL_BACKLIGHT: what writing /sys/class/backlight/amdgpu_bl<n>/
+ * brightness does, for the first built-in panel of the file's GPU; a
+ * negative brightness only asks. */
+int
+lx_glue_backlight(void *_file, int brightness, int *current, int *maximum)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct amdgpu_device *adev = drm_to_adev(file->minor->dev);
+	struct backlight_device *bd = NULL;
+	int i, error = 0;
+
+	for (i = 0; i < AMDGPU_DM_MAX_NUM_EDP && bd == NULL; i++)
+		bd = adev->dm.backlight_dev[i];
+	if (bd == NULL)
+		return -ENODEV;
+
+	if (brightness >= 0)
+		error = backlight_device_set_brightness(bd, brightness);
+	*current = bd->props.brightness;
+	*maximum = bd->props.max_brightness;
+	return error;
+}
