@@ -22,7 +22,9 @@
 # Defaults: out-packages, /lib/firmware (the host's linux-firmware, files
 # compressed or not) and its LICENSE.amdgpu. FIRMWARE_VERSION=YYYYMMDD (and
 # FIRMWARE_REVISION, default 1) name the firmware package for a tree other
-# than the host's linux-firmware package. HAIKU_BUILD is the configured
+# than the host's linux-firmware package. DRIVER_REVISION (default 1) is the
+# driver package's revision, for a rebuild of the same commit date that has
+# to replace an installed package. HAIKU_BUILD is the configured
 # Haiku build directory the driver was linked in (for the package tool and
 # the haiku version).
 set -euo pipefail
@@ -174,7 +176,7 @@ framebuffer driver until it is deleted.
 EOF
 cat > "$drv/.PackageInfo" <<EOF
 name			amdgpu_drm
-version			$driverVersion-1
+version			$driverVersion-${DRIVER_REVISION:-1}
 architecture	x86_64
 summary			"Linux's amdgpu driver for AMD Radeon GPUs"
 description		"amdgpu_drm runs Linux $linuxVersion's amdgpu, DRM, TTM and Display \
@@ -192,7 +194,7 @@ requires		{
 	amdgpu_firmwares
 }
 EOF
-driverPackage=$OUTPUT/amdgpu_drm-$driverVersion-1-x86_64.hpkg
+driverPackage=$OUTPUT/amdgpu_drm-$driverVersion-${DRIVER_REVISION:-1}-x86_64.hpkg
 rm -f "$driverPackage"
 (cd "$drv" && "$TOOL" create -q "$driverPackage")
 echo "$driverPackage (requires haiku >= $haikuVersion)"
