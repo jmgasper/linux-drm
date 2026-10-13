@@ -25,6 +25,11 @@ struct lx_irq {
 	bool running;
 	bool stop;
 	struct wait_queue_head idle;
+	/* for lx_irq_stats(): interrupts that came, handler runs, and when the
+	 * thread last started one */
+	unsigned long arrived;
+	unsigned long handled;
+	u64 handler_started;
 };
 
 static LIST_HEAD(lx_irqs);
@@ -35,6 +40,7 @@ static void
 lx_irq_top_half(void *data)
 {
 	struct lx_irq *desc = data;
+	WRITE_ONCE(desc->arrived, desc->arrived + 1);
 	lx_haiku_event_signal(desc->event);
 }
 
@@ -49,6 +55,8 @@ lx_irq_thread(void *data)
 		if (READ_ONCE(desc->stop))
 			break;
 		WRITE_ONCE(desc->running, true);
+		WRITE_ONCE(desc->handler_started, ktime_get_ns());
+		WRITE_ONCE(desc->handled, desc->handled + 1);
 		if (READ_ONCE(desc->disable_depth) > 0) {
 			WRITE_ONCE(desc->running, false);
 			wake_up_all(&desc->idle);
@@ -107,6 +115,30 @@ request_threaded_irq(unsigned int irq, irq_handler_t handler,
 	list_add_tail(&desc->entry, &lx_irqs);
 	mutex_unlock(&lx_irqs_lock);
 	return 0;
+}
+
+
+/*	For a watchdog: of the first interrupt handler of \a dev_id, how many
+	interrupts came and how many handler runs started, and for how long the
+	running one has been running (0 when none is). */
+void
+lx_irq_stats(void *dev_id, unsigned long *arrived, unsigned long *handled,
+	u64 *running_ns)
+{
+	struct lx_irq *desc;
+	*arrived = *handled = 0;
+	*running_ns = 0;
+	mutex_lock(&lx_irqs_lock);
+	list_for_each_entry(desc, &lx_irqs, entry) {
+		if (desc->dev_id != dev_id)
+			continue;
+		*arrived = READ_ONCE(desc->arrived);
+		*handled = READ_ONCE(desc->handled);
+		if (READ_ONCE(desc->running))
+			*running_ns = ktime_get_ns() - READ_ONCE(desc->handler_started);
+		break;
+	}
+	mutex_unlock(&lx_irqs_lock);
 }
 
 

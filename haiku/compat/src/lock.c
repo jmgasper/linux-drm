@@ -491,6 +491,18 @@ call_rcu(struct rcu_head *head, rcu_callback_t func)
 }
 
 
+/* for a watchdog: call_rcu() callbacks queued but not run yet */
+unsigned long
+lx_rcu_backlog(void)
+{
+	unsigned long backlog;
+	spin_lock(&rcu_lock);
+	backlog = rcu_queued - rcu_done;
+	spin_unlock(&rcu_lock);
+	return backlog;
+}
+
+
 void
 rcu_barrier(void)
 {

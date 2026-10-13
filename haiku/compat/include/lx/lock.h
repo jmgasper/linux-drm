@@ -451,6 +451,7 @@ void synchronize_rcu(void);
 typedef void (*rcu_callback_t)(struct rcu_head *head);
 void call_rcu(struct rcu_head *head, rcu_callback_t func);
 void rcu_barrier(void);
+unsigned long lx_rcu_backlog(void);
 void lx_kfree_rcu(void *object, struct rcu_head *head);
 #define kfree_rcu(ptr, rhf)		lx_kfree_rcu((ptr), &(ptr)->rhf)
 #define kvfree_rcu(ptr, rhf)	lx_kfree_rcu((ptr), &(ptr)->rhf)

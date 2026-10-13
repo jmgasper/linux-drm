@@ -93,6 +93,8 @@ drm_devices(struct drm_device **devices, int max)
 
 static int haiku_console_test;
 static void lx_glue_console_test(void);
+static void lx_glue_watchdog_start(void);
+static struct task_struct *watchdog_thread;
 static void lx_glue_console_moved(void);
 /* the kernel debugger's console, see lx_glue_update_debug_console() */
 static void *console_base;
@@ -133,6 +135,8 @@ lx_glue_set_param(const char *name, const char *value)
 			lx_glue_console_test();
 		if (error == 0 && strcmp(name, "haiku_console_connector") == 0)
 			lx_glue_console_moved();
+		if (error == 0 && strcmp(name, "haiku_watchdog_ms") == 0)
+			lx_glue_watchdog_start();
 		return error;
 	}
 	pr_info("amdgpu: no parameter %s\n", name);
@@ -336,6 +340,10 @@ void lx_glue_fake_device_stop(void);
 void
 lx_glue_uninit(void)
 {
+	if (watchdog_thread != NULL) {
+		kthread_stop(watchdog_thread);
+		watchdog_thread = NULL;
+	}
 	/* amdgpu's mapping of the VRAM goes away */
 	if (console_base != NULL) {
 		lx_haiku_debug_console(NULL, 0, 0, 0);
@@ -471,6 +479,74 @@ lx_glue_close(void *file)
 {
 	lx_trace_calls_start();
 	fput(file);
+}
+
+
+/* #pragma mark - watchdog */
+
+/* Lab aid for hangs that stop the whole machine: "haiku_watchdog_ms 1000"
+ * (settings, or drmparam with log_file set) logs once a period how many
+ * interrupts came and were handled, the IH ring's read pointer, the RCU
+ * backlog, and the rings with work outstanding (completed/emitted fence) -
+ * the last lines before the machine stopped say what the GPU was doing. */
+static int haiku_watchdog_ms;
+module_param(haiku_watchdog_ms, int, 0644);
+
+static int
+lx_glue_watchdog(void *unused)
+{
+	while (!kthread_should_stop()) {
+		int period = READ_ONCE(haiku_watchdog_ms), i;
+		if (period <= 0) {
+			msleep(500);
+			continue;
+		}
+		msleep(period);
+		for (i = 0; i < probed_count; i++) {
+			struct drm_device *dev = pci_get_drvdata(probed[i]);
+			struct amdgpu_device *adev;
+			unsigned long arrived, handled;
+			u64 running;
+			char line[640];
+			int n, r;
+
+			if (dev == NULL)
+				continue;
+			adev = drm_to_adev(dev);
+			lx_irq_stats(dev, &arrived, &handled, &running);
+			n = scnprintf(line, sizeof(line),
+				"watchdog: irq %lu/%lu running %llu ms ih %u rcu %lu", arrived,
+				handled, (unsigned long long)(running / 1000000),
+				adev->irq.ih.rptr, lx_rcu_backlog());
+			for (r = 0; r < AMDGPU_MAX_RINGS && n < (int)sizeof(line) - 48;
+					r++) {
+				struct amdgpu_ring *ring = adev->rings[r];
+				u32 signaled, emitted;
+				if (ring == NULL || !ring->sched.ready)
+					continue;
+				signaled = atomic_read(&ring->fence_drv.last_seq);
+				emitted = ring->fence_drv.sync_seq;
+				if (signaled != emitted) {
+					n += scnprintf(line + n, sizeof(line) - n, " %s %u/%u",
+						ring->name, signaled, emitted);
+				}
+			}
+			pr_info("%s\n", line);
+		}
+	}
+	return 0;
+}
+
+
+static void
+lx_glue_watchdog_start(void)
+{
+	struct task_struct *thread;
+	if (READ_ONCE(haiku_watchdog_ms) <= 0 || watchdog_thread != NULL)
+		return;
+	thread = kthread_run(lx_glue_watchdog, NULL, "amdgpu watchdog");
+	if (!IS_ERR(thread))
+		watchdog_thread = thread;
 }
 
 

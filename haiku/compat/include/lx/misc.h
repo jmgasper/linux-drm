@@ -300,6 +300,8 @@ int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
 int request_threaded_irq(unsigned int irq, irq_handler_t handler,
 	irq_handler_t thread_fn, unsigned long flags, const char *name, void *dev);
 const void *free_irq(unsigned int irq, void *dev_id);
+void lx_irq_stats(void *dev_id, unsigned long *arrived, unsigned long *handled,
+	u64 *running_ns);
 void disable_irq(unsigned int irq);
 void disable_irq_nosync(unsigned int irq);
 void enable_irq(unsigned int irq);
