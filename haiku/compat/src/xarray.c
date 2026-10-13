@@ -442,16 +442,26 @@ xa_clear_mark(struct xarray *xa, unsigned long index, xa_mark_t mark)
 /* #pragma mark - IDR */
 
 
+/*	IDs below an IDR's base are taken as its base, as in Linux: an IDR made
+	with idr_init_base(idr, 1) is walked from 0 (idr_for_each_entry()), and
+	"0 - base" would be the largest index instead of the first. */
+static inline unsigned long
+idr_index(const struct idr *idr, unsigned long id)
+{
+	return id < idr->idr_base ? 0 : id - idr->idr_base;
+}
+
+
 int
 idr_alloc_u32(struct idr *idr, void *ptr, u32 *nextid, unsigned long max,
 	gfp_t gfp)
 {
-	struct xa_limit limit = XA_LIMIT(*nextid - idr->idr_base,
-		max - idr->idr_base);
+	struct xa_limit limit;
 	u32 id;
 	int error;
-	if ((long)max < (long)*nextid)
+	if ((long)max < (long)*nextid || max < idr->idr_base)
 		return -ENOSPC;
+	limit = XA_LIMIT(idr_index(idr, *nextid), max - idr->idr_base);
 	error = xa_alloc(&idr->idr_rt, &id, ptr, limit, gfp);
 	if (error == -EBUSY)
 		return -ENOSPC;
@@ -474,16 +484,23 @@ idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp)
 }
 
 
+/* Linux's: from the ID after the last one, then from the start again */
 int
 idr_alloc_cyclic(struct idr *idr, void *ptr, int start, int end, gfp_t gfp)
 {
-	u32 id;
-	u32 next = max_t(u32, start, idr->idr_next);
-	struct xa_limit limit = XA_LIMIT(start, end > 0 ? end - 1 : INT_MAX);
-	int error = xa_alloc_cyclic(&idr->idr_rt, &id, ptr, limit, &next, gfp);
-	if (error < 0)
-		return error == -EBUSY ? -ENOSPC : error;
-	idr->idr_next = next;
+	u32 id = idr->idr_next;
+	unsigned long max = end > 0 ? end - 1 : INT_MAX;
+	int error;
+	if ((int)id < start)
+		id = start;
+	error = idr_alloc_u32(idr, ptr, &id, max, gfp);
+	if (error == -ENOSPC && id > (u32)start) {
+		id = start;
+		error = idr_alloc_u32(idr, ptr, &id, max, gfp);
+	}
+	if (error != 0)
+		return error;
+	idr->idr_next = id + 1;
 	return id;
 }
 
@@ -523,7 +540,7 @@ idr_replace(struct idr *idr, void *ptr, unsigned long id)
 void *
 idr_get_next_ul(struct idr *idr, unsigned long *nextid)
 {
-	unsigned long index = *nextid - idr->idr_base;
+	unsigned long index = idr_index(idr, *nextid);
 	void *entry = xa_find(&idr->idr_rt, &index, ULONG_MAX, XA_PRESENT);
 	if (entry != NULL)
 		*nextid = index + idr->idr_base;
