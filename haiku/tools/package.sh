@@ -9,9 +9,10 @@
 #   amdgpu_drm-<version>-1-x86_64.hpkg     the driver (a release build, out-
 #       release/amdgpu_drm) as bin/amdgpu_drm, published in dev/graphics and
 #       dev/dri; requires the firmware and the haiku package it was built
-#       against. Its post-install script blocks the image's native amdgpu
-#       driver and amduvd decoder (/boot/system/settings/packages): two
-#       drivers must never start the same GPU.
+#       against. On an image that still has the native amdgpu driver, its
+#       post-install script blocks that driver and its amduvd decoder
+#       (/boot/system/settings/packages): two drivers must never start the
+#       same GPU.
 #
 # The accelerant (amdgpu_kms) comes with haiku.hpkg; the GPU user land
 # (libdrm, libva, Mesa) is built on the machine (gpu-userland-build.sh).
@@ -118,9 +119,12 @@ ln -s ../../bin/amdgpu_drm "$drv/add-ons/kernel/drivers/dev/graphics/amdgpu_drm"
 ln -s ../../bin/amdgpu_drm "$drv/add-ons/kernel/drivers/dev/dri/amdgpu_drm"
 cat > "$drv/boot/post-install/amdgpu_drm-block-native.sh" <<'EOF'
 #!/bin/sh
-# amdgpu_drm drives AMD GPUs: the image's native amdgpu driver (WX 5100) and
-# its amduvd decoder must not start as well. Takes effect at the next boot.
+# amdgpu_drm drives AMD GPUs: an image that still has the native amdgpu
+# driver (WX 5100, air/OS images before its removal) must not start it, nor
+# its amduvd decoder. Images without it need nothing here; there amduvd may
+# be amdgpu_va, which must not be blocked. Takes effect at the next boot.
 settings=/boot/system/settings/packages
+[ -e /boot/system/add-ons/kernel/drivers/bin/amdgpu ] || exit 0
 grep -qs amdgpu_drm "$settings" && exit 0
 cat >> "$settings" <<'BLOCK'
 # amdgpu_drm drives the GPU here: the native amdgpu driver and its decoder
