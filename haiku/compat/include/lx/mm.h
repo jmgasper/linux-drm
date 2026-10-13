@@ -217,9 +217,13 @@ struct kmem_cache {
 	void (*ctor)(void *);
 	struct list_head entry;		/* in the list of caches, for lx_mm_stats() */
 	long live;					/* objects allocated and not freed */
+	bool tracked;				/* its objects are kept in a table, for
+								   lx_kmem_cache_for_each() */
 };
 
 int lx_mm_stats(char *buffer, int size);
+void lx_kmem_cache_for_each(const char *name,
+	void (*function)(void *object, s64 age_ns, void *data), void *data);
 #define SLAB_HWCACHE_ALIGN	((__force slab_flags_t)0x00002000U)
 #define SLAB_RECLAIM_ACCOUNT ((__force slab_flags_t)0x00020000U)
 #define SLAB_PANIC			((__force slab_flags_t)0x00040000U)

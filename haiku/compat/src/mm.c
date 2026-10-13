@@ -11,6 +11,7 @@
 	up to a page). vmalloc() memory is an area. */
 
 #include <lx/haiku.h>
+#include <linux/hash.h>
 
 
 /* #pragma mark - kmalloc */
@@ -37,6 +38,82 @@ kmalloc_alignment(size_t size)
 static long lx_kmalloc_live, lx_kmalloc_bytes, lx_pages_live;
 static LIST_HEAD(lx_kmem_caches);
 static DEFINE_MUTEX(lx_kmem_caches_lock);
+
+/*	With "haiku_track_objects 1", the objects of some caches
+	(lx_tracked_caches) are kept in a table with the time they were
+	allocated, so that a lab report can look at the ones that live long
+	(lx_kmem_cache_for_each()). Off, it costs nothing. */
+static const char *const lx_tracked_caches[] = { "drm_sched_fence" };
+static bool haiku_track_objects;
+module_param(haiku_track_objects, bool, 0644);
+static bool lx_tracked_ever;
+
+struct lx_tracked_object {
+	struct hlist_node node;
+	void *object;
+	s64 time;
+};
+
+#define LX_TRACKED_BITS	12
+static struct hlist_head lx_tracked[1 << LX_TRACKED_BITS];
+static DEFINE_SPINLOCK(lx_tracked_lock);
+
+
+static unsigned int
+lx_tracked_bucket(const void *object)
+{
+	return hash_ptr((void *)object, LX_TRACKED_BITS);
+}
+
+
+static void
+lx_track(void *object)
+{
+	struct lx_tracked_object *entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (entry == NULL)
+		return;
+	entry->object = object;
+	entry->time = lx_system_time_ns();
+	spin_lock(&lx_tracked_lock);
+	hlist_add_head(&entry->node, &lx_tracked[lx_tracked_bucket(object)]);
+	spin_unlock(&lx_tracked_lock);
+}
+
+
+static void
+lx_untrack(void *object)
+{
+	struct lx_tracked_object *entry, *found = NULL;
+	spin_lock(&lx_tracked_lock);
+	hlist_for_each_entry(entry, &lx_tracked[lx_tracked_bucket(object)], node) {
+		if (entry->object == object) {
+			hlist_del(&entry->node);
+			found = entry;
+			break;
+		}
+	}
+	spin_unlock(&lx_tracked_lock);
+	kfree(found);
+}
+
+
+/*	Calls \a function for every live object of the tracked cache \a name,
+	with the tracking lock held (it must not allocate or block). */
+void
+lx_kmem_cache_for_each(const char *name,
+	void (*function)(void *object, s64 age_ns, void *data), void *data)
+{
+	struct lx_tracked_object *entry;
+	s64 now = lx_system_time_ns();
+	int i;
+	(void)name;
+	spin_lock(&lx_tracked_lock);
+	for (i = 0; i < (1 << LX_TRACKED_BITS); i++) {
+		hlist_for_each_entry(entry, &lx_tracked[i], node)
+			function(entry->object, now - entry->time, data);
+	}
+	spin_unlock(&lx_tracked_lock);
+}
 
 
 void *
@@ -150,6 +227,7 @@ kmem_cache_create(const char *name, unsigned int size, unsigned int align,
 	slab_flags_t flags, void (*ctor)(void *))
 {
 	struct kmem_cache *cache = kzalloc(sizeof(*cache), GFP_KERNEL);
+	unsigned int i;
 	if (cache == NULL)
 		return NULL;
 	cache->name = name;
@@ -157,6 +235,10 @@ kmem_cache_create(const char *name, unsigned int size, unsigned int align,
 	cache->align = align;
 	cache->flags = flags;
 	cache->ctor = ctor;
+	for (i = 0; i < ARRAY_SIZE(lx_tracked_caches); i++) {
+		if (name != NULL && strcmp(name, lx_tracked_caches[i]) == 0)
+			cache->tracked = true;
+	}
 	mutex_lock(&lx_kmem_caches_lock);
 	list_add_tail(&cache->entry, &lx_kmem_caches);
 	mutex_unlock(&lx_kmem_caches_lock);
@@ -182,6 +264,10 @@ kmem_cache_alloc(struct kmem_cache *cache, gfp_t flags)
 	void *object = kmalloc(cache->size, flags);
 	if (object != NULL) {
 		__atomic_add_fetch(&cache->live, 1, __ATOMIC_RELAXED);
+		if (cache->tracked && READ_ONCE(haiku_track_objects)) {
+			WRITE_ONCE(lx_tracked_ever, true);
+			lx_track(object);
+		}
 		if (cache->ctor != NULL)
 			cache->ctor(object);
 	}
@@ -192,8 +278,11 @@ kmem_cache_alloc(struct kmem_cache *cache, gfp_t flags)
 void
 kmem_cache_free(struct kmem_cache *cache, void *object)
 {
-	if (object != NULL)
+	if (object != NULL) {
 		__atomic_sub_fetch(&cache->live, 1, __ATOMIC_RELAXED);
+		if (cache->tracked && READ_ONCE(lx_tracked_ever))
+			lx_untrack(object);
+	}
 	kfree(object);
 }
 

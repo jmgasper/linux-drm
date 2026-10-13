@@ -24,6 +24,9 @@
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_plane.h>
+#include <drm/gpu_scheduler.h>
+#include <linux/dma-resv.h>
+#include <drm/ttm/ttm_resource.h>
 
 #include "amdgpu.h"
 #include "amdgpu_dpm.h"
@@ -98,6 +101,8 @@ drm_devices(struct drm_device **devices, int max)
 static int haiku_console_test;
 static void lx_glue_console_test(void);
 static void lx_glue_watchdog_start(void);
+static void lx_glue_fence_report(void);
+static int haiku_fence_report;
 static struct task_struct *watchdog_thread;
 static void lx_glue_console_moved(void);
 /* the kernel debugger's console, see lx_glue_update_debug_console() */
@@ -141,6 +146,9 @@ lx_glue_set_param(const char *name, const char *value)
 			lx_glue_console_moved();
 		if (error == 0 && strcmp(name, "haiku_watchdog_ms") == 0)
 			lx_glue_watchdog_start();
+		if (error == 0 && strcmp(name, "haiku_fence_report") == 0
+			&& haiku_fence_report)
+			lx_glue_fence_report();
 		return error;
 	}
 	pr_info("amdgpu: no parameter %s\n", name);
@@ -503,6 +511,233 @@ static int haiku_watchdog_ms;
 module_param(haiku_watchdog_ms, int, 0644);
 static int haiku_watchdog_slow_ms = 10;
 module_param(haiku_watchdog_slow_ms, int, 0644);
+
+/* "drmparam haiku_fence_report 1": the scheduler fences that are alive, by
+ * scheduler - how many have finished (signaled), have been scheduled, have
+ * a hardware fence and whether that has signaled, how old they are, how
+ * many references they have and which DRM clients (negative: the kernel's
+ * jobs) made them; then the files open, the buffers TTM has and the jobs
+ * the schedulers hold. Fences that live on after their work is done have a
+ * holder that does not let go. Only fences made while "haiku_track_objects
+ * 1" (compat/src/mm.c) is set are seen. */
+static int haiku_fence_report;
+module_param(haiku_fence_report, int, 0644);
+
+struct fence_report_row {
+	struct drm_gpu_scheduler *sched;
+	unsigned long count, finished, scheduled, parent, parent_signaled;
+	unsigned long older_10s, older_60s, refs[4], scheduled_refs[3];
+	u64 clients[4];
+	unsigned long client_counts[4], other_clients;
+};
+
+struct fence_report {
+	struct fence_report_row rows[24];
+	int row_count;
+	unsigned long other;
+};
+
+
+static void
+fence_report_one(void *object, s64 age_ns, void *data)
+{
+	struct fence_report *report = data;
+	struct drm_sched_fence *fence = object;
+	struct fence_report_row *row = NULL;
+	unsigned int refs;
+	int i;
+
+	for (i = 0; i < report->row_count; i++) {
+		if (report->rows[i].sched == fence->sched)
+			row = &report->rows[i];
+	}
+	if (row == NULL) {
+		if (report->row_count == ARRAY_SIZE(report->rows)) {
+			report->other++;
+			return;
+		}
+		row = &report->rows[report->row_count++];
+		row->sched = fence->sched;
+	}
+	row->count++;
+	if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->finished.flags))
+		row->finished++;
+	if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->scheduled.flags))
+		row->scheduled++;
+	if (fence->parent != NULL) {
+		row->parent++;
+		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->parent->flags))
+			row->parent_signaled++;
+	}
+	if (age_ns > 10 * NSEC_PER_SEC)
+		row->older_10s++;
+	if (age_ns > 60 * NSEC_PER_SEC)
+		row->older_60s++;
+	refs = kref_read(&fence->finished.refcount);
+	row->refs[min(refs, 3u)]++;
+	/* the scheduled fence holds a reference to the finished one */
+	refs = kref_read(&fence->scheduled.refcount);
+	row->scheduled_refs[min(refs, 2u)]++;
+	for (i = 0; i < 4; i++) {
+		if (row->client_counts[i] == 0 || row->clients[i] == fence->drm_client_id) {
+			row->clients[i] = fence->drm_client_id;
+			row->client_counts[i]++;
+			return;
+		}
+	}
+	row->other_clients++;
+}
+
+
+/* the buffers TTM has in VRAM, GTT and system memory, how many of them wait
+ * to be deleted, and the fences their reservations hold */
+static void
+lx_glue_buffer_report(struct amdgpu_device *adev)
+{
+	static const struct {
+		int type;
+		const char *name;
+	} types[] = {
+		{ TTM_PL_VRAM, "vram" }, { TTM_PL_TT, "gtt" }, { TTM_PL_SYSTEM, "system" },
+	};
+	struct ttm_device *bdev = &adev->mman.bdev;
+	unsigned int t;
+
+	for (t = 0; t < ARRAY_SIZE(types); t++) {
+		struct ttm_resource_manager *man = ttm_manager_type(bdev, types[t].type);
+		struct ttm_resource_cursor cursor;
+		struct ttm_resource *res;
+		unsigned long buffers = 0, deleted = 0, fences = 0, sched_fences = 0;
+		unsigned long deleted_fences = 0, most = 0;
+		if (man == NULL)
+			continue;
+		spin_lock(&bdev->lru_lock);
+		ttm_resource_cursor_init(&cursor, man);
+		ttm_resource_manager_for_each_res(&cursor, res) {
+			struct ttm_buffer_object *bo = res->bo;
+			struct dma_resv_iter iter;
+			struct dma_fence *fence;
+			unsigned long count = 0;
+			if (bo == NULL)
+				continue;
+			buffers++;
+			if (bo->deleted)
+				deleted++;
+			dma_resv_iter_begin(&iter, bo->base.resv, DMA_RESV_USAGE_BOOKKEEP);
+			dma_resv_for_each_fence_unlocked(&iter, fence) {
+				count++;
+				if (to_drm_sched_fence(fence) != NULL)
+					sched_fences++;
+			}
+			dma_resv_iter_end(&iter);
+			fences += count;
+			most = max(most, count);
+			if (bo->deleted)
+				deleted_fences += count;
+		}
+		ttm_resource_cursor_fini(&cursor);
+		spin_unlock(&bdev->lru_lock);
+		pr_info("fences: %s: %lu buffers (%lu waiting to be deleted), %lu "
+			"fences in their reservations (%lu of schedulers, %lu of deleted "
+			"buffers, at most %lu in one)\n", types[t].name, buffers, deleted,
+			fences, sched_fences, deleted_fences, most);
+	}
+}
+
+
+/* the jobs each ring's scheduler still has: done ones wait for free_job */
+static void
+lx_glue_job_report(struct amdgpu_device *adev)
+{
+	int r;
+	for (r = 0; r < AMDGPU_MAX_RINGS; r++) {
+		struct amdgpu_ring *ring = adev->rings[r];
+		struct drm_gpu_scheduler *sched;
+		struct drm_sched_job *job;
+		unsigned long pending = 0, done = 0;
+		/* the KIQ and others have no scheduler, but sched.ready is set
+		 * once their ring test passed: their lists are zeroes */
+		if (ring == NULL || ring->no_scheduler || !ring->sched.ready
+			|| ring->sched.ops == NULL || ring->sched.pending_list.next == NULL)
+			continue;
+		sched = &ring->sched;
+		spin_lock(&sched->job_list_lock);
+		list_for_each_entry(job, &sched->pending_list, list) {
+			pending++;
+			if (job->s_fence != NULL && test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,
+					&job->s_fence->finished.flags))
+				done++;
+		}
+		spin_unlock(&sched->job_list_lock);
+		if (pending > 0) {
+			pr_info("fences: %s: %lu jobs pending, %lu of them done\n",
+				ring->name, pending, done);
+		}
+	}
+}
+
+
+static void
+lx_glue_fence_report(void)
+{
+	struct fence_report *report = kzalloc(sizeof(*report), GFP_KERNEL);
+	int i;
+	if (report == NULL)
+		return;
+	lx_kmem_cache_for_each("drm_sched_fence", fence_report_one, report);
+	for (i = 0; i < report->row_count; i++) {
+		struct fence_report_row *row = &report->rows[i];
+		pr_info("fences: %s: %lu alive, %lu finished, %lu scheduled, %lu with "
+			"a hardware fence (%lu signaled), %lu older than 10 s, %lu than "
+			"60 s, references 0/1/2/3+: %lu/%lu/%lu/%lu, scheduled fence "
+			"references 0/1/2+: %lu/%lu/%lu, clients %llu:%lu %llu:%lu %llu:%lu "
+			"%llu:%lu +%lu\n",
+			row->sched != NULL ? row->sched->name : "(no scheduler)",
+			row->count, row->finished, row->scheduled, row->parent,
+			row->parent_signaled, row->older_10s, row->older_60s,
+			row->refs[0], row->refs[1], row->refs[2], row->refs[3],
+			row->scheduled_refs[0], row->scheduled_refs[1],
+			row->scheduled_refs[2],
+			(unsigned long long)row->clients[0], row->client_counts[0],
+			(unsigned long long)row->clients[1], row->client_counts[1],
+			(unsigned long long)row->clients[2], row->client_counts[2],
+			(unsigned long long)row->clients[3], row->client_counts[3],
+			row->other_clients);
+	}
+	if (report->other > 0)
+		pr_info("fences: %lu more of other schedulers\n", report->other);
+	kfree(report);
+
+	/* the files open on the GPUs, with their contexts and buffer handles:
+	 * a file a team left behind keeps its contexts' last fences */
+	for (i = 0; i < probed_count; i++) {
+		struct drm_device *dev = pci_get_drvdata(probed[i]);
+		struct drm_file *file;
+		int files = 0, contexts = 0, handles = 0, id;
+		void *entry;
+		if (dev == NULL)
+			continue;
+		mutex_lock(&dev->filelist_mutex);
+		list_for_each_entry(file, &dev->filelist, lhead) {
+			struct amdgpu_fpriv *fpriv = file->driver_priv;
+			files++;
+			if (fpriv != NULL) {
+				idr_for_each_entry(&fpriv->ctx_mgr.ctx_handles, entry, id)
+					contexts++;
+			}
+			spin_lock(&file->table_lock);
+			idr_for_each_entry(&file->object_idr, entry, id)
+				handles++;
+			spin_unlock(&file->table_lock);
+		}
+		mutex_unlock(&dev->filelist_mutex);
+		pr_info("fences: %d files open, %d contexts, %d buffer handles\n",
+			files, contexts, handles);
+		lx_glue_buffer_report(drm_to_adev(dev));
+		lx_glue_job_report(drm_to_adev(dev));
+	}
+}
+
 
 static void
 lx_glue_watchdog_report(long irq_thread, u64 running_ms)
@@ -1305,6 +1540,23 @@ lx_glue_selftest(void)
 	idr_init_base(&idr, 1);
 	result = idr_alloc(&idr, &idr, 1, 0, GFP_KERNEL);
 	SELFTEST(result == 1 && idr_find(&idr, 1) == &idr, "idr_alloc");
+	{
+		/* walked from 0, as idr_for_each_entry() does, and allocated from
+		 * below its base: amdgpu's contexts and DRM's handles */
+		struct idr based;
+		void *entry;
+		int id, seen = 0, a, b, c;
+		idr_init_base(&based, 1);
+		a = idr_alloc(&based, &based, 0, 0, GFP_KERNEL);
+		b = idr_alloc(&based, &seen, 1, 0, GFP_KERNEL);
+		c = idr_alloc_cyclic(&based, &id, 1, 0, GFP_KERNEL);
+		idr_for_each_entry(&based, entry, id)
+			seen++;
+		SELFTEST(a == 1 && b == 2 && c == 3 && seen == 3
+			&& idr_find(&based, 0) == NULL && idr_find(&based, 3) == &id,
+			"idr_init_base(1): allocation and idr_for_each_entry");
+		idr_destroy(&based);
+	}
 	idr_destroy(&idr);
 
 	ww_mutex_init(&a, &selftest_ww_class);
