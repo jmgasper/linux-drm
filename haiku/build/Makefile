@@ -45,7 +45,19 @@ HAIKU_DEFINES := $(if $(ARMED_ONLY),-DAMDGPU_DRM_ARMED_ONLY)
 
 # Call trace builds (see compat/src/trace.c), best into their own OUT:
 #   make ... OUT=out-trace TRACE_CALLS="drivers/gpu/drm/ttm/ttm_bo.c ..."
+# Linux files by their path in linux/, the compat layer's and the glue's as
+# compat/<file>.c and glue/<file>.c (not compat/trace.c or vsprintf.c, which
+# the trace itself runs). Functions whose names contain one of
+# TRACE_EXCLUDE's parts are left out: by default the register accessors,
+# which polling loops call by the thousand, and the memory allocator's.
 TRACE_CALLS ?=
+TRACE_EXCLUDE ?= amdgpu_device_rreg,amdgpu_device_wreg,amdgpu_mm_
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),amdgpu_device_indirect_,amdgpu_device_pcie_
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),amdgpu_device_xcc_,amdgpu_cgs_,amdgpu_device_skip_hw_access
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),lx_kmalloc,lx_kfree,lx_krealloc,kmem_cache_alloc
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),kmem_cache_free,lx_track,lx_untrack,lx_site,ksize
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),lx_pfn_to_page,lx_virt_to_phys,page_run_,lx_flush_
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),is_vmalloc_addr,kmalloc_alignment
 
 # --- flags -------------------------------------------------------------------
 
@@ -131,8 +143,12 @@ ALL_OBJS := $(CORE_OBJS) $(AMD_OBJS) $(AMD_FP_OBJS) $(LX_COMPAT_OBJS) $(GLUE_OBJ
 $(AMD_OBJS) $(AMD_FP_OBJS): GROUP_FLAGS := $(AMD_INCLUDES) -DBUILD_FEATURE_TIMING_SYNC=0
 $(AMD_FP_OBJS): GROUP_FLAGS += -msse -msse2 -mhard-float -D_LINUX_FPU_COMPILATION_UNIT
 $(CORE_OBJS): GROUP_FLAGS :=
-$(call obj,$(TRACE_CALLS)): GROUP_FLAGS += -finstrument-functions \
-	-finstrument-functions-exclude-file-list=/include/
+TRACE_OBJS := $(call obj,$(filter-out compat/% glue/%,$(TRACE_CALLS))) \
+	$(patsubst compat/%.c,$(OUT)/obj/compat/%.o,$(filter compat/%,$(TRACE_CALLS))) \
+	$(patsubst glue/%.c,$(OUT)/obj/glue/%.o,$(filter glue/%,$(TRACE_CALLS)))
+$(TRACE_OBJS): GROUP_FLAGS += -finstrument-functions \
+	-finstrument-functions-exclude-file-list=/include/ \
+	-finstrument-functions-exclude-function-list=$(TRACE_EXCLUDE)
 
 .PHONY: all core amdgpu compat haiku clean
 all: $(ADDON)
@@ -151,12 +167,13 @@ $(OUT)/obj/linux/%.o: $(LINUX)/%.c
 $(OUT)/obj/compat/%.o: $(COMPAT)/src/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   compat/$*.c"
-	@$(CC) $(LXFLAGS) -DKBUILD_MODNAME='"amdgpu"' -c $< -o $@
+	@$(CC) $(LXFLAGS) $(GROUP_FLAGS) -DKBUILD_MODNAME='"amdgpu"' -c $< -o $@
 
 $(OUT)/obj/glue/%.o: $(DRIVER)/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   glue/$*.c"
-	@$(CC) $(LXFLAGS) $(AMD_INCLUDES) -DKBUILD_MODNAME='"amdgpu"' -c $< -o $@
+	@$(CC) $(LXFLAGS) $(AMD_INCLUDES) $(GROUP_FLAGS) -DKBUILD_MODNAME='"amdgpu"' \
+		-c $< -o $@
 
 $(OUT)/obj/haiku/%.o: $(ROOT)/haiku/%.cpp
 	@mkdir -p $(dir $@)

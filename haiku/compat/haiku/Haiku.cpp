@@ -12,7 +12,9 @@
 
 #include <KernelExport.h>
 #include <OS.h>
+#include <Drivers.h>
 #include <fs_info.h>
+#include <fs_interface.h>
 
 #include <condition_variable.h>
 #include <cpu.h>
@@ -54,9 +56,11 @@ static const int kLinuxEINTR = 4;
 // #pragma mark - output, time, processors
 
 
-/*	The log file must exist already, preallocated (zeros): it is overwritten
-	from the start and never grows, so that a synced write changes no file
-	system structure that a crash right after it could lose. */
+/*	The log file must exist already, preallocated (zeros): it is written in
+	place and never grows, so that a synced write changes no file system
+	structure that a crash right after it could lose. Each opening continues
+	after the text already in it (the first zero byte), so the boot after a
+	crash keeps the crashed boot's lines; a full file starts over. */
 static int sLogFile = -1;
 static off_t sLogPosition;
 static off_t sLogSize;
@@ -73,7 +77,8 @@ lx_haiku_log_file(const char* path)
 	}
 	if (path == NULL || path[0] == '\0')
 		return 0;
-	int fd = _kern_open(-1, path, O_WRONLY, 0);
+	// read too: the end of the text already in it
+	int fd = _kern_open(-1, path, O_RDWR, 0);
 	if (fd < 0)
 		return -kLinuxEIO;
 	struct stat st;
@@ -85,7 +90,136 @@ lx_haiku_log_file(const char* path)
 	sLogFile = fd;
 	sLogPosition = 0;
 	sLogSize = st.st_size;
+	// a 64 KiB stack buffer is too much for a kernel thread
+	const size_t kChunk = 65536;
+	char* chunk = (char*)malloc(kChunk);
+	off_t end = -1;
+	while (chunk != NULL && end < 0 && sLogPosition < sLogSize) {
+		ssize_t bytes = _kern_read(fd, sLogPosition, chunk, kChunk);
+		if (bytes <= 0)
+			break;
+		char* zero = (char*)memchr(chunk, 0, bytes);
+		if (zero != NULL)
+			end = sLogPosition + (zero - chunk);
+		else
+			sLogPosition += bytes;
+	}
+	free(chunk);
+	sLogPosition = end >= 0 ? end : 0;
+	char line[96];
+	snprintf(line, sizeof(line), "==== log opened, %lu s real time, %"
+		B_PRId64 " ms after boot\n", (unsigned long)real_time_clock(),
+		system_time() / 1000);
+	locker.Unlock();
+	lx_haiku_log(line);
 	return 0;
+}
+
+
+/*	A second way to the disk for the log, around the file system and its
+	caches: the log file's last MiB, written on the raw partition (and the
+	drive's cache flushed). For a watch thread's reports when file I/O itself
+	may be what waits: the messages of the thread lx_haiku_raw_log_start()
+	names go there. Only the disk's own I/O path has to work then. Prepared
+	before a stall: opening the partition then might wait as well. */
+static int sRawDevice = -1;
+static off_t sRawOffset;
+static off_t sRawSize;
+static off_t sRawBlockStart;
+static size_t sRawFill;
+static char* sRawBlock;
+static const size_t kRawBlockSize = 4096;
+static thread_id sRawThread = -1;
+static mutex sRawLock = MUTEX_INITIALIZER("amdgpu_drm raw log");
+
+
+extern "C" int
+lx_haiku_raw_log_prepare(void)
+{
+	MutexLocker locker(sLogFileLock);
+	if (sLogFile < 0 || sRawDevice >= 0 || sLogSize < 2 * 1048576)
+		return -1;
+	struct vnode* vnode;
+	if (vfs_get_vnode_from_fd(sLogFile, true, &vnode) != B_OK)
+		return -1;
+	file_io_vec vecs[4];
+	size_t count = 4;
+	status_t status = vfs_get_file_map(vnode, sLogSize - 1048576, 1048576,
+		vecs, &count);
+	vfs_put_vnode(vnode);
+	struct stat st;
+	fs_info info;
+	if (status != B_OK || count < 1 || vecs[0].offset < 0
+		|| vecs[0].offset % 512 != 0
+		|| _kern_read_stat(sLogFile, NULL, false, &st, sizeof(st)) != B_OK
+		|| fs_stat_dev(st.st_dev, &info) != 0)
+		return -1;
+	sRawBlock = (char*)malloc(kRawBlockSize);
+	if (sRawBlock == NULL)
+		return -1;
+	int fd = _kern_open(-1, info.device_name, O_RDWR, 0);
+	if (fd < 0) {
+		free(sRawBlock);
+		sRawBlock = NULL;
+		return -1;
+	}
+	sRawDevice = fd;
+	// the file's own log stops short of it
+	sLogSize -= 1048576;
+	sRawOffset = vecs[0].offset;
+	sRawSize = min_c(vecs[0].length, (off_t)1048576) / kRawBlockSize
+		* kRawBlockSize;
+	sRawBlockStart = 0;
+	sRawFill = 0;
+	memset(sRawBlock, 0, kRawBlockSize);
+	return 0;
+}
+
+
+extern "C" void
+lx_haiku_raw_log_start(int32 thread)
+{
+	if (sRawDevice >= 0)
+		sRawThread = thread;
+}
+
+
+extern "C" void
+lx_haiku_raw_log_end(void)
+{
+	MutexLocker locker(sRawLock);
+	sRawThread = -1;
+	if (sRawDevice >= 0)
+		_kern_close(sRawDevice);
+	sRawDevice = -1;
+	free(sRawBlock);
+	sRawBlock = NULL;
+}
+
+
+static void
+raw_log(const char* text)
+{
+	MutexLocker locker(sRawLock);
+	if (sRawDevice < 0)
+		return;
+	for (size_t length = strlen(text); length > 0;) {
+		if (sRawFill == kRawBlockSize) {
+			if (sRawBlockStart + (off_t)kRawBlockSize >= sRawSize)
+				return;
+			sRawBlockStart += kRawBlockSize;
+			sRawFill = 0;
+			memset(sRawBlock, 0, kRawBlockSize);
+		}
+		size_t part = min_c(length, kRawBlockSize - sRawFill);
+		memcpy(sRawBlock + sRawFill, text, part);
+		sRawFill += part;
+		text += part;
+		length -= part;
+		_kern_write(sRawDevice, sRawOffset + sRawBlockStart, sRawBlock,
+			kRawBlockSize);
+	}
+	_kern_ioctl(sRawDevice, B_FLUSH_DRIVE_CACHE, NULL, 0);
 }
 
 
@@ -93,13 +227,33 @@ extern "C" void
 lx_haiku_log(const char* text)
 {
 	dprintf("%s", text);
+	if (sRawThread >= 0 && are_interrupts_enabled()
+		&& thread_get_current_thread_id() == sRawThread) {
+		raw_log(text);
+		return;
+	}
 	if (sLogFile >= 0 && are_interrupts_enabled()) {
+		// in the file, lines begin with the time since boot ("[s.ms] ")
+		static bool sLineStart = true;
+		char stamp[32];
+		size_t stampLength = 0;
+		bigtime_t now = system_time();
 		MutexLocker locker(sLogFileLock);
 		size_t length = strlen(text);
-		if (sLogFile >= 0 && sLogPosition + (off_t)length <= sLogSize) {
+		if (sLineStart) {
+			stampLength = snprintf(stamp, sizeof(stamp), "[%" B_PRId64
+				".%03d] ", now / 1000000, (int)(now / 1000 % 1000));
+		}
+		if (sLogFile >= 0
+			&& sLogPosition + (off_t)(stampLength + length) <= sLogSize) {
+			if (stampLength > 0) {
+				_kern_write(sLogFile, sLogPosition, stamp, stampLength);
+				sLogPosition += stampLength;
+			}
 			_kern_write(sLogFile, sLogPosition, text, length);
 			sLogPosition += length;
 			_kern_fsync(sLogFile, true);
+			sLineStart = length > 0 && text[length - 1] == '\n';
 		}
 	}
 }
@@ -543,10 +697,18 @@ lx_haiku_log_thread(lx_thread_id id, const char* what)
 	uint32 type = thread->wait.type;
 	const void* object = thread->wait.object;
 	cpu_ent* cpu = thread->cpu;
+	// a semaphore by name: looked up by its ID, which is safe also when the
+	// thread wakes meanwhile (unlike reading a lock or condition variable)
+	char objectName[B_OS_NAME_LENGTH] = "";
+	sem_info info;
+	if (state == B_THREAD_WAITING && type == THREAD_BLOCK_TYPE_SEMAPHORE
+		&& get_sem_info((sem_id)(addr_t)object, &info) == B_OK) {
+		strlcpy(objectName, info.name, sizeof(objectName));
+	}
 	snprintf(line, sizeof(line), "  %s: thread %" B_PRId32 " (%s) state %"
-		B_PRId32 " cpu %" B_PRId32 " waits (type %" B_PRIu32 ") on %p, "
+		B_PRId32 " cpu %" B_PRId32 " waits (type %" B_PRIu32 ") on %p %s, "
 		"anchor %#lx\n", what, thread->id, thread->name, state,
-		cpu != NULL ? cpu->cpu_num : -1, type, object,
+		cpu != NULL ? cpu->cpu_num : -1, type, object, objectName,
 		(addr_t)&__cyg_profile_func_enter);
 	lx_haiku_log(line);
 	if (state == B_THREAD_WAITING && thread != thread_get_current_thread()) {
@@ -578,6 +740,14 @@ lx_haiku_log_thread(lx_thread_id id, const char* what)
 		}
 	}
 	thread->ReleaseReference();
+}
+
+
+/*	How much has gone to the log file: grows while anything is logged. */
+extern "C" int64
+lx_haiku_log_position(void)
+{
+	return sLogPosition;
 }
 
 

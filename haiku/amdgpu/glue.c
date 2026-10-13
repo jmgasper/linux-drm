@@ -168,6 +168,8 @@ lx_glue_init(void)
 {
 	int error;
 
+	/* the first message: opens log_file, if the settings name one */
+	pr_info("amdgpu_drm: starting\n");
 	lx_cpu_init();
 	lx_drm_hotplug_hook = hotplug_event;
 	lx_unmap_mapping_range_hook = lx_glue_unmap_mapping_range;
@@ -194,6 +196,7 @@ lx_glue_init(void)
 	error = lx_module_init_amdgpu_init();
 	if (error != 0)
 		goto err_sched;
+	pr_info("amdgpu_drm: starting: modules initialized\n");
 	return 0;
 
 err_sched:
@@ -379,6 +382,9 @@ void lx_glue_fake_device_stop(void);
 void
 lx_glue_uninit(void)
 {
+	/* each step logged: release builds only stop when devfs reloads the
+	 * driver (its binary changed), the one time this path runs */
+	pr_info("amdgpu_drm: stopping\n");
 	if (watchdog_thread != NULL) {
 		kthread_stop(watchdog_thread);
 		watchdog_thread = NULL;
@@ -392,19 +398,25 @@ lx_glue_uninit(void)
 	lx_glue_fake_device_stop();
 	while (probed_count > 0) {
 		struct pci_dev *pdev = probed[--probed_count];
+		pr_info("amdgpu_drm: stopping: removing %s\n", pci_name(pdev));
 		if (pdev->driver != NULL && pdev->driver->remove != NULL)
 			pdev->driver->remove(pdev);
+		pr_info("amdgpu_drm: stopping: removed, releasing its resources\n");
 		devres_release_all(&pdev->dev);
 		pdev->driver = NULL;
+		pr_info("amdgpu_drm: stopping: released\n");
 	}
+	pr_info("amdgpu_drm: stopping: module exits\n");
 	lx_module_exit_amdgpu_exit();
 	lx_module_exit_drm_sched_fence_slab_fini();
 	lx_module_exit_drm_display_helper_module_exit();
 	lx_module_exit_gpu_buddy_module_exit();
 	lx_module_exit_drm_core_exit();
+	pr_info("amdgpu_drm: stopping: workqueues, RCU, timers\n");
 	lx_workqueue_exit();
 	lx_rcu_exit();
 	lx_timer_exit();
+	pr_info("amdgpu_drm: stopped\n");
 	/* no code of this image may run after it is unloaded */
 	lx_haiku_set_task_exit_hook(NULL);
 	lx_haiku_log_file(NULL);

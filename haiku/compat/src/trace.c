@@ -9,7 +9,8 @@
 	as "T<thread> <offset>", the function's distance from
 	__cyg_profile_func_enter. haiku/tools/symbolize-trace.sh turns that back
 	into names. Tracing starts at the first close of a DRM file when the
-	trace_calls parameter is set, and stays on. */
+	trace_calls parameter is 1, when the driver stops (devfs unloads it)
+	when it is 2, and stays on. */
 
 #include <lx/haiku.h>
 
@@ -21,12 +22,23 @@ static int trace_active;
 
 
 void lx_trace_calls_start(void);
+void lx_trace_calls_start_stop(void);
 
 void
 lx_trace_calls_start(void)
 {
-	if (READ_ONCE(trace_calls) && !READ_ONCE(trace_active)) {
+	if (READ_ONCE(trace_calls) == 1 && !READ_ONCE(trace_active)) {
 		printk("trace: calls from here on\n");
+		WRITE_ONCE(trace_active, 1);
+	}
+}
+
+
+void
+lx_trace_calls_start_stop(void)
+{
+	if (READ_ONCE(trace_calls) == 2 && !READ_ONCE(trace_active)) {
+		printk("trace: calls of the stop from here on\n");
 		WRITE_ONCE(trace_active, 1);
 	}
 }
