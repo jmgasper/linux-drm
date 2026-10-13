@@ -33,6 +33,10 @@
 
 extern void (*lx_drm_hotplug_hook)(struct drm_device *dev);
 static void hotplug_event(struct drm_device *dev);
+extern void (*lx_unmap_mapping_range_hook)(struct address_space *mapping,
+	loff_t start, loff_t length);
+static void lx_glue_unmap_mapping_range(struct address_space *as,
+	loff_t start, loff_t length);
 
 #ifndef DRM_MAJOR
 #	define DRM_MAJOR 226
@@ -154,6 +158,7 @@ lx_glue_init(void)
 
 	lx_cpu_init();
 	lx_drm_hotplug_hook = hotplug_event;
+	lx_unmap_mapping_range_hook = lx_glue_unmap_mapping_range;
 	error = lx_workqueue_init();
 	if (error != 0)
 		return error;
@@ -369,6 +374,7 @@ lx_glue_uninit(void)
 	/* no code of this image may run after it is unloaded */
 	lx_haiku_set_task_exit_hook(NULL);
 	lx_haiku_log_file(NULL);
+	lx_unmap_mapping_range_hook = NULL;
 }
 
 
@@ -897,23 +903,67 @@ lx_glue_deselect(void *_select)
 
 /* #pragma mark - mapping buffers */
 
+/*	A buffer mapped into teams: its Linux vm_area_struct, through which the
+	Haiku driver runs the buffer's fault handler for the pages a team
+	touches. When TTM moves the buffer it calls unmap_mapping_range(); the
+	driver then unmaps the pages from every team, which fault them in again
+	at the buffer's new place. Without that, a team would keep writing to
+	the pages the buffer had before: VRAM another buffer has now, or memory
+	Haiku has given back to someone else. */
 
 struct lx_mapping {
 	struct vm_area_struct vma;
 	struct lx_vma_pages *pages;
+	struct list_head entry;		/* in lx_mappings while attached */
+	struct mutex fault_lock;	/* faults share pages->pfns */
+	void (*invalidate)(void *owner, unsigned long first, unsigned long count);
+	void *owner;
 };
 
+static LIST_HEAD(lx_mappings);
+static DEFINE_MUTEX(lx_mappings_lock);
 
-/*	Looks up the buffer at a fake offset (DRM_IOCTL_*_GEM_MMAP), runs its
-	fault handler for every page and returns the page frames and caching;
-	the caller maps them. lx_glue_unmap() ends the mapping. */
+
+/*	unmap_mapping_range(): \a start and \a length are bytes of the fake
+	offsets (DRM_IOCTL_*_GEM_MMAP), a length of 0 meaning to the end. TTM
+	calls it holding the buffer's reservation, before it moves the buffer. */
+static void
+lx_glue_unmap_mapping_range(struct address_space *as, loff_t start,
+	loff_t length)
+{
+	unsigned long first = start >> PAGE_SHIFT;
+	unsigned long end = length == 0 ? ULONG_MAX
+		: (unsigned long)((start + length + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	struct lx_mapping *mapping;
+
+	mutex_lock(&lx_mappings_lock);
+	list_for_each_entry(mapping, &lx_mappings, entry) {
+		unsigned long mapFirst = mapping->vma.vm_pgoff;
+		unsigned long mapEnd = mapFirst + mapping->pages->count;
+		unsigned long from, to;
+		if (as != NULL && mapping->vma.vm_file->f_mapping != as)
+			continue;
+		from = max(first, mapFirst);
+		to = min(end, mapEnd);
+		if (from < to)
+			mapping->invalidate(mapping->owner, from - mapFirst, to - from);
+	}
+	mutex_unlock(&lx_mappings_lock);
+}
+
+
+/*	Looks up the buffer at a fake offset (DRM_IOCTL_*_GEM_MMAP) and sets up
+	a mapping of it; lx_glue_map_fault() then finds the pages. Until
+	lx_glue_map_detach(), \a invalidate is called (with the mappings' lock
+	held) for the pages that move: their indices within the mapping. */
 void *
 lx_glue_map(void *_file, unsigned long long offset, unsigned long size,
-	int writable, unsigned long **_pfns, int *_caching)
+	int writable, void (*invalidate)(void *owner, unsigned long first,
+		unsigned long count), void *owner)
 {
 	struct file *filp = _file;
 	struct lx_mapping *mapping;
-	unsigned long count = size >> PAGE_SHIFT, i;
+	unsigned long count = size >> PAGE_SHIFT;
 	int error;
 
 	if (size == 0 || (size & ~PAGE_MASK) != 0 || (offset & ~PAGE_MASK) != 0)
@@ -931,6 +981,10 @@ lx_glue_map(void *_file, unsigned long long offset, unsigned long size,
 		return ERR_PTR(-ENOMEM);
 	}
 	mapping->pages->count = count;
+	INIT_LIST_HEAD(&mapping->entry);
+	mutex_init(&mapping->fault_lock);
+	mapping->invalidate = invalidate;
+	mapping->owner = owner;
 
 	/* any page aligned address: only offsets within the area count */
 	mapping->vma.vm_start = 0x100000000UL;
@@ -949,37 +1003,9 @@ lx_glue_map(void *_file, unsigned long long offset, unsigned long size,
 		goto err_close;
 	}
 
-	mapping->vma.lx_haiku = mapping->pages;
-	for (i = 0; i < count; i++) {
-		struct vm_fault vmf = {};
-		vm_fault_t result;
-		if (mapping->pages->pfns[i] != 0)
-			continue;
-		vmf.vma = &mapping->vma;
-		vmf.address = mapping->vma.vm_start + i * PAGE_SIZE;
-		vmf.pgoff = mapping->vma.vm_pgoff + i;
-		vmf.flags = writable ? FAULT_FLAG_WRITE : 0;
-		vmf.gfp_mask = GFP_KERNEL;
-		result = mapping->vma.vm_ops->fault(&vmf);
-		if ((result & VM_FAULT_ERROR) || mapping->pages->pfns[i] == 0) {
-			error = -EFAULT;
-			goto err_close;
-		}
-	}
-	mapping->vma.lx_haiku = NULL;
-
-	switch (mapping->pages->prot & _PAGE_CACHE_MASK) {
-		case 0x18:
-			*_caching = LX_HAIKU_MAP_UC;
-			break;
-		case 0x8:
-			*_caching = LX_HAIKU_MAP_WC;
-			break;
-		default:
-			*_caching = LX_HAIKU_MAP_WB;
-			break;
-	}
-	*_pfns = mapping->pages->pfns;
+	mutex_lock(&lx_mappings_lock);
+	list_add_tail(&mapping->entry, &lx_mappings);
+	mutex_unlock(&lx_mappings_lock);
 	return mapping;
 
 err_close:
@@ -992,12 +1018,91 @@ err:
 }
 
 
+/*	Runs the buffer's fault handler for page \a first of the mapping and the
+	ones after it, up to \a max pages or the end of the mapping, and returns
+	how many pages from \a first on it found (their page frames in \a pfns,
+	and the caching, LX_HAIKU_MAP_*, in \a caching), 0 when it should be
+	tried again (a signal interrupted a wait), or a negative error. The
+	buffer may move again right after; the caller has to know whether
+	\a invalidate was called meanwhile. */
+long
+lx_glue_map_fault(void *_mapping, unsigned long first, unsigned long *pfns,
+	unsigned long max, int *caching)
+{
+	struct lx_mapping *mapping = _mapping;
+	struct lx_vma_pages *pages = mapping->pages;
+	unsigned long end, i, found = 0;
+	long result = 0;
+
+	if (first >= pages->count)
+		return -EFAULT;
+	end = min(pages->count, first + max);
+
+	mutex_lock(&mapping->fault_lock);
+	memset(&pages->pfns[first], 0, (end - first) * sizeof(pages->pfns[0]));
+	mapping->vma.lx_haiku = pages;
+	for (i = first; i < end; i++) {
+		struct vm_fault vmf = {};
+		vm_fault_t fault;
+		if (pages->pfns[i] != 0)
+			continue;
+		vmf.vma = &mapping->vma;
+		vmf.address = mapping->vma.vm_start + i * PAGE_SIZE;
+		vmf.pgoff = mapping->vma.vm_pgoff + i;
+		vmf.flags = (mapping->vma.vm_flags & VM_WRITE) ? FAULT_FLAG_WRITE : 0;
+		vmf.gfp_mask = GFP_KERNEL;
+		fault = mapping->vma.vm_ops->fault(&vmf);
+		if (fault & VM_FAULT_ERROR) {
+			if (i == first)
+				result = -EFAULT;
+			break;
+		}
+		if (pages->pfns[i] == 0)
+			break;
+	}
+	mapping->vma.lx_haiku = NULL;
+	while (first + found < end && pages->pfns[first + found] != 0) {
+		pfns[found] = pages->pfns[first + found];
+		found++;
+	}
+	switch (pages->prot & _PAGE_CACHE_MASK) {
+		case 0x18:
+			*caching = LX_HAIKU_MAP_UC;
+			break;
+		case 0x8:
+			*caching = LX_HAIKU_MAP_WC;
+			break;
+		default:
+			*caching = LX_HAIKU_MAP_WB;
+			break;
+	}
+	mutex_unlock(&mapping->fault_lock);
+	return result < 0 ? result : (long)found;
+}
+
+
+/*	Ends the calls to the mapping's invalidate function: when this returns,
+	none is running or will be. */
+void
+lx_glue_map_detach(void *_mapping)
+{
+	struct lx_mapping *mapping = _mapping;
+	mutex_lock(&lx_mappings_lock);
+	if (!list_empty(&mapping->entry))
+		list_del_init(&mapping->entry);
+	mutex_unlock(&lx_mappings_lock);
+}
+
+
+/*	Ends a mapping (detached, and with no lx_glue_map_fault() running). */
 void
 lx_glue_unmap(void *_mapping)
 {
 	struct lx_mapping *mapping = _mapping;
+	lx_glue_map_detach(mapping);
 	if (mapping->vma.vm_ops != NULL && mapping->vma.vm_ops->close != NULL)
 		mapping->vma.vm_ops->close(&mapping->vma);
+	mutex_destroy(&mapping->fault_lock);
 	kvfree(mapping->pages);
 	kfree(mapping);
 }
@@ -1185,7 +1290,210 @@ lx_glue_selftest(void)
 /* #pragma mark - fake device */
 
 /*	A DRM device without hardware ("haiku_selftest 2"), so that opening
-	/dev/dri nodes, ioctls and closing can be tried in a virtual machine. */
+	/dev/dri nodes, ioctls, mapping buffers and closing can be tried in a
+	virtual machine (tests/fakemap.c). Its buffers are pages of RAM; the
+	"move" ioctl gives one new pages the way TTM moves a buffer (unmap the
+	CPU mappings, copy, under the reservation) and poisons the old ones, so
+	that a mapping that did not follow reads the poison. */
+
+struct drm_haiku_fake_create {
+	__u64 size;
+	__u32 handle;
+	__u32 pad;
+	__u64 offset;		/* for DRM_HAIKU_IOCTL_MAP */
+};
+
+struct drm_haiku_fake_move {
+	__u32 handle;
+	__u32 pad;
+};
+
+#define DRM_HAIKU_FAKE_CREATE	0x00
+#define DRM_HAIKU_FAKE_MOVE		0x01
+#define DRM_IOCTL_HAIKU_FAKE_CREATE	DRM_IOWR(DRM_COMMAND_BASE \
+	+ DRM_HAIKU_FAKE_CREATE, struct drm_haiku_fake_create)
+#define DRM_IOCTL_HAIKU_FAKE_MOVE	DRM_IOW(DRM_COMMAND_BASE \
+	+ DRM_HAIKU_FAKE_MOVE, struct drm_haiku_fake_move)
+
+#define FAKE_POISON	0x5a
+
+#define FAKE_OLD_KEPT	8
+
+struct fake_bo {
+	struct drm_gem_object base;
+	unsigned long count;
+	struct page **pages;
+	struct list_head old;		/* earlier pages, poisoned; older ones are
+								   freed, as TTM frees them */
+	unsigned int old_count;
+};
+
+struct fake_old_pages {
+	struct list_head entry;
+	struct page **pages;
+};
+
+
+static void
+fake_free_pages(struct page **pages, unsigned long count)
+{
+	unsigned long i;
+	for (i = 0; i < count; i++) {
+		if (pages[i] != NULL)
+			__free_page(pages[i]);
+	}
+	kvfree(pages);
+}
+
+
+static struct page **
+fake_alloc_pages(unsigned long count)
+{
+	struct page **pages = kvcalloc(count, sizeof(*pages), GFP_KERNEL);
+	unsigned long i;
+	if (pages == NULL)
+		return NULL;
+	for (i = 0; i < count; i++) {
+		pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (pages[i] == NULL) {
+			fake_free_pages(pages, count);
+			return NULL;
+		}
+	}
+	return pages;
+}
+
+
+static void
+fake_bo_free(struct drm_gem_object *obj)
+{
+	struct fake_bo *bo = container_of(obj, struct fake_bo, base);
+	struct fake_old_pages *old, *next;
+	list_for_each_entry_safe(old, next, &bo->old, entry) {
+		fake_free_pages(old->pages, bo->count);
+		kfree(old);
+	}
+	fake_free_pages(bo->pages, bo->count);
+	drm_gem_free_mmap_offset(obj);
+	drm_gem_object_release(obj);
+	kfree(bo);
+}
+
+
+static vm_fault_t
+fake_fault(struct vm_fault *vmf)
+{
+	struct fake_bo *bo = vmf->vma->vm_private_data;
+	unsigned long page = vmf->pgoff - drm_vma_node_start(&bo->base.vma_node);
+	vm_fault_t result;
+	/* like TTM's: under the reservation, which a move holds */
+	if (dma_resv_lock_interruptible(bo->base.resv, NULL) != 0)
+		return VM_FAULT_NOPAGE;
+	if (page >= bo->count)
+		result = VM_FAULT_SIGBUS;
+	else {
+		result = vmf_insert_pfn_prot(vmf->vma, vmf->address,
+			page_to_pfn(bo->pages[page]), PAGE_KERNEL);
+	}
+	dma_resv_unlock(bo->base.resv);
+	return result;
+}
+
+
+static const struct vm_operations_struct fake_vm_ops = {
+	.fault = fake_fault,
+	.open = drm_gem_vm_open,
+	.close = drm_gem_vm_close,
+};
+
+static const struct drm_gem_object_funcs fake_gem_funcs = {
+	.free = fake_bo_free,
+	.vm_ops = &fake_vm_ops,
+};
+
+
+static int
+fake_create_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct drm_haiku_fake_create *args = data;
+	struct fake_bo *bo;
+	int error;
+
+	if (args->size == 0 || args->size > (64 << 20))
+		return -EINVAL;
+	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	if (bo == NULL)
+		return -ENOMEM;
+	bo->count = PAGE_ALIGN(args->size) >> PAGE_SHIFT;
+	INIT_LIST_HEAD(&bo->old);
+	bo->base.funcs = &fake_gem_funcs;
+	drm_gem_private_object_init(dev, &bo->base, bo->count << PAGE_SHIFT);
+	bo->pages = fake_alloc_pages(bo->count);
+	if (bo->pages == NULL) {
+		drm_gem_object_release(&bo->base);
+		kfree(bo);
+		return -ENOMEM;
+	}
+	error = drm_gem_create_mmap_offset(&bo->base);
+	if (error == 0)
+		error = drm_gem_handle_create(file, &bo->base, &args->handle);
+	if (error == 0)
+		args->offset = drm_vma_node_offset_addr(&bo->base.vma_node);
+	drm_gem_object_put(&bo->base);
+	return error;
+}
+
+
+static int
+fake_move_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct drm_haiku_fake_move *args = data;
+	struct drm_gem_object *obj = drm_gem_object_lookup(file, args->handle);
+	struct fake_bo *bo;
+	struct fake_old_pages *old;
+	struct page **pages;
+	unsigned long i;
+
+	if (obj == NULL)
+		return -ENOENT;
+	bo = container_of(obj, struct fake_bo, base);
+	old = kzalloc(sizeof(*old), GFP_KERNEL);
+	pages = fake_alloc_pages(bo->count);
+	if (old == NULL || pages == NULL) {
+		kfree(old);
+		if (pages != NULL)
+			fake_free_pages(pages, bo->count);
+		drm_gem_object_put(obj);
+		return -ENOMEM;
+	}
+	dma_resv_lock(obj->resv, NULL);
+	/* what ttm_bo_handle_move_mem() does first */
+	drm_vma_node_unmap(&obj->vma_node, dev->anon_inode->i_mapping);
+	for (i = 0; i < bo->count; i++) {
+		memcpy(page_address(pages[i]), page_address(bo->pages[i]), PAGE_SIZE);
+		memset(page_address(bo->pages[i]), FAKE_POISON, PAGE_SIZE);
+	}
+	old->pages = bo->pages;
+	list_add_tail(&old->entry, &bo->old);
+	bo->pages = pages;
+	if (++bo->old_count > FAKE_OLD_KEPT) {
+		old = list_first_entry(&bo->old, struct fake_old_pages, entry);
+		list_del(&old->entry);
+		fake_free_pages(old->pages, bo->count);
+		kfree(old);
+		bo->old_count--;
+	}
+	dma_resv_unlock(obj->resv);
+	drm_gem_object_put(obj);
+	return 0;
+}
+
+
+static const struct drm_ioctl_desc fake_ioctls[] = {
+	DRM_IOCTL_DEF_DRV(HAIKU_FAKE_CREATE, fake_create_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(HAIKU_FAKE_MOVE, fake_move_ioctl, DRM_RENDER_ALLOW),
+};
+
 
 static const struct file_operations fake_fops = {
 	.owner = THIS_MODULE,
@@ -1201,6 +1509,8 @@ static const struct file_operations fake_fops = {
 
 static const struct drm_driver fake_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER,
+	.ioctls = fake_ioctls,
+	.num_ioctls = ARRAY_SIZE(fake_ioctls),
 	.fops = &fake_fops,
 	.name = "haiku_fake",
 	.desc = "Haiku compat test device",

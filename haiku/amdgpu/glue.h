@@ -31,7 +31,11 @@ void *lx_glue_select(void *file, void (*notify)(void *cookie, unsigned int event
 void lx_glue_deselect(void *select);
 
 void *lx_glue_map(void *file, unsigned long long offset, unsigned long size,
-	int writable, unsigned long **pfns, int *caching);
+	int writable, void (*invalidate)(void *owner, unsigned long first,
+		unsigned long count), void *owner);
+long lx_glue_map_fault(void *mapping, unsigned long first, unsigned long *pfns,
+	unsigned long max, int *caching);
+void lx_glue_map_detach(void *mapping);
 void lx_glue_unmap(void *mapping);
 int lx_glue_is_error(const void *pointer);
 int lx_glue_selftest(void);

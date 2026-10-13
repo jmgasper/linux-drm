@@ -26,15 +26,18 @@
 #include <SupportDefs.h>
 #include <errno.h>
 
+#include <condition_variable.h>
 #include <lock.h>
 #include <team.h>
 #include <util/AutoLock.h>
 #include <util/DoublyLinkedList.h>
 #include <vm/vm.h>
+#include <vm/vm_page.h>
+#include <vm/vm_priv.h>
 #include <vm/VMAddressSpace.h>
 #include <vm/VMArea.h>
-#include <sys/uio.h>
-#include <util/iovec_support.h>
+#include <vm/VMCache.h>
+#include <vm/VMTranslationMap.h>
 
 #include <syscalls.h>
 
@@ -181,11 +184,299 @@ haiku_status(long linuxError)
 // #pragma mark - buffer mappings
 
 
+/*!	The cache of a buffer mapped into teams (DRM_HAIKU_IOCTL_MAP). It has no
+	pages of its own: Fault() runs the buffer's Linux fault handler and maps
+	the page frames it finds into the area that faulted, and when TTM moves
+	the buffer, Invalidate() unmaps them from every area again, so that the
+	next access finds the buffer at its new place - what Linux's
+	unmap_mapping_range() does for a mmap()ed buffer. Areas cloned from the
+	area, or inherited by fork(), share the cache (B_SHARED_AREA).
+
+	Locking: the VM calls Fault() with the address space read locked and the
+	cache locked. The Linux fault handler waits for the buffer's
+	reservation, which TTM holds while it calls Invalidate(), which locks the
+	cache; so the handler runs with the cache unlocked, and the generation
+	tells afterwards whether the buffer moved meanwhile.
+*/
+class BufferCache final : public VMCache {
+public:
+								BufferCache();
+
+			status_t			Init(page_num_t pageCount);
+			void				SetMapping(void* mapping);
+
+	virtual	status_t			Fault(VMAddressSpace* addressSpace,
+									off_t offset);
+			status_t			FaultIn(VMAddressSpace* addressSpace,
+									page_num_t page, page_num_t end);
+
+			void				Invalidate(page_num_t first, page_num_t count);
+			void*				Detach();
+
+protected:
+	virtual	void				DeleteObject();
+
+private:
+			void				_Unmap(page_num_t first, page_num_t count);
+
+private:
+			void*				fMapping;
+				// the glue's mapping; NULL once detached
+			page_num_t			fPageCount;
+			uint32				fGeneration;
+				// changes whenever pages are unmapped
+			int32				fFaulting;
+			ConditionVariable	fFaultsDone;
+};
+
+
+static const page_num_t kFaultPages = 64;
+	// pages mapped at once: the one touched and the ones after it
+
+
+static uint32
+memory_type(int caching)
+{
+	switch (caching) {
+		case 0:
+			return B_UNCACHED_MEMORY;
+		case 1:
+			return B_WRITE_COMBINING_MEMORY;
+		default:
+			return B_WRITE_BACK_MEMORY;
+	}
+}
+
+
+BufferCache::BufferCache()
+	:
+	fMapping(NULL),
+	fPageCount(0),
+	fGeneration(0),
+	fFaulting(0)
+{
+}
+
+
+status_t
+BufferCache::Init(page_num_t pageCount)
+{
+	status_t status = VMCache::Init("drm buffer", CACHE_TYPE_DEVICE, 0);
+	if (status != B_OK)
+		return status;
+	fPageCount = pageCount;
+	virtual_end = (off_t)pageCount * B_PAGE_SIZE;
+	fFaultsDone.Init(this, "drm buffer faults");
+	return B_OK;
+}
+
+
+void
+BufferCache::SetMapping(void* mapping)
+{
+	AutoLocker<VMCache> locker(this);
+	fMapping = mapping;
+}
+
+
+status_t
+BufferCache::Fault(VMAddressSpace* addressSpace, off_t offset)
+{
+	page_num_t page = offset / B_PAGE_SIZE;
+	if (page >= fPageCount)
+		return B_BAD_ADDRESS;
+
+	Unlock();
+	status_t status = FaultIn(addressSpace, page,
+		min_c(page + kFaultPages, fPageCount));
+	Lock();
+	return status;
+}
+
+
+/*!	Maps the pages [page, end) of the buffer into the team's areas of the
+	cache, as far as they are in them. The address space must be read locked
+	(its areas then stay), the cache must not be locked.
+*/
+status_t
+BufferCache::FaultIn(VMAddressSpace* addressSpace, page_num_t page,
+	page_num_t end)
+{
+	VMTranslationMap* map = addressSpace->TranslationMap();
+	int retries = 0;
+	while (page < end) {
+		VMArea* targets[4];
+		int targetCount = 0;
+		Lock();
+		void* mapping = fMapping;
+		uint32 generation = fGeneration;
+		for (VMArea* area = areas.First(); area != NULL && targetCount < 4;
+				area = areas.GetNext(area)) {
+			if (area->address_space == addressSpace
+				&& (off_t)page * B_PAGE_SIZE >= area->cache_offset
+				&& (off_t)page * B_PAGE_SIZE
+					< area->cache_offset + (off_t)area->Size()) {
+				targets[targetCount++] = area;
+			}
+		}
+		if (mapping == NULL || targetCount == 0) {
+			Unlock();
+			return B_BAD_ADDRESS;
+		}
+		fFaulting++;
+		Unlock();
+
+		unsigned long pfns[kFaultPages];
+		int caching;
+		long count = lx_glue_map_fault(mapping, page, pfns,
+			min_c(end - page, kFaultPages), &caching);
+
+		// page tables for them, while nothing is locked
+		size_t reservePages = 0;
+		for (int i = 0; i < targetCount && count > 0; i++) {
+			VMArea* area = targets[i];
+			addr_t first = area->Base() + page * B_PAGE_SIZE
+				- area->cache_offset;
+			addr_t last = min_c(first + count * B_PAGE_SIZE,
+				area->Base() + area->Size()) - 1;
+			reservePages += map->MaxPagesNeededToMap(first, last);
+		}
+		vm_page_reservation reservation;
+		vm_page_reserve_pages(&reservation, reservePages, VM_PRIORITY_USER);
+
+		Lock();
+		if (--fFaulting == 0 && fMapping == NULL)
+			fFaultsDone.NotifyAll();
+		bool current = generation == fGeneration;
+		if (count > 0 && current) {
+			uint32 type = memory_type(caching);
+			map->Lock();
+			for (int i = 0; i < targetCount; i++) {
+				VMArea* area = targets[i];
+				// fork() doesn't copy the type, and a "device" area's
+				// pages are unmapped without page bookkeeping. (The area's
+				// memory type stays the default: the pages have theirs,
+				// and deleting an area with one looks for a range that
+				// arch_vm_set_memory_type() would have registered.)
+				area->cache_type = CACHE_TYPE_DEVICE;
+				for (long index = 0; index < count; index++) {
+					off_t offset = (off_t)(page + index) * B_PAGE_SIZE;
+					if (offset >= area->cache_offset + (off_t)area->Size())
+						break;
+					addr_t address = area->Base() + offset - area->cache_offset;
+					phys_addr_t physical;
+					uint32 flags;
+					if (map->Query(address, &physical, &flags) == B_OK
+						&& (flags & PAGE_PRESENT) != 0) {
+						continue;
+					}
+					map->Map(address, (phys_addr_t)pfns[index] * B_PAGE_SIZE,
+						area->protection, type, &reservation);
+				}
+			}
+			map->Unlock();
+		}
+		Unlock();
+		vm_page_unreserve_pages(&reservation);
+
+		if (count < 0)
+			return B_BAD_ADDRESS;
+		if (count == 0) {
+			// a signal interrupted a wait: the access faults again
+			snooze(1000);
+			return B_OK;
+		}
+		if (!current && ++retries < 3) {
+			// the buffer moved meanwhile (the fault handler may have moved
+			// it itself, to where the CPU can reach it)
+			continue;
+		}
+		page += count;
+		retries = 0;
+	}
+	return B_OK;
+}
+
+
+/*!	The buffer moves: unmaps the pages [first, first + count) from all areas.
+	Called by TTM through unmap_mapping_range(), with the buffer reserved.
+*/
+void
+BufferCache::Invalidate(page_num_t first, page_num_t count)
+{
+	AutoLocker<VMCache> locker(this);
+	fGeneration++;
+	_Unmap(first, count);
+}
+
+
+/*!	Ends the faults: unmaps everything, waits for faults in progress and
+	returns the glue's mapping for lx_glue_unmap(). Areas left then fault
+	with B_BAD_ADDRESS.
+*/
+void*
+BufferCache::Detach()
+{
+	Lock();
+	void* mapping = fMapping;
+	fMapping = NULL;
+	fGeneration++;
+	_Unmap(0, fPageCount);
+	while (fFaulting > 0) {
+		ConditionVariableEntry entry;
+		fFaultsDone.Add(&entry);
+		Unlock();
+		entry.Wait();
+		Lock();
+	}
+	Unlock();
+	return mapping;
+}
+
+
+void
+BufferCache::DeleteObject()
+{
+	delete this;
+}
+
+
+/*!	The cache must be locked. Its areas stay in their address spaces while
+	they are in the cache's list (delete_area() removes them from the list
+	first).
+*/
+void
+BufferCache::_Unmap(page_num_t first, page_num_t count)
+{
+	off_t start = (off_t)first * B_PAGE_SIZE;
+	off_t end = (off_t)(first + count) * B_PAGE_SIZE;
+	for (VMArea* area = areas.First(); area != NULL;
+			area = areas.GetNext(area)) {
+		off_t from = max_c(start, area->cache_offset);
+		off_t to = min_c(end, area->cache_offset + (off_t)area->Size());
+		if (from >= to)
+			continue;
+		VMTranslationMap* map = area->address_space->TranslationMap();
+		map->Lock();
+		map->Unmap(area->Base() + (from - area->cache_offset),
+			area->Base() + (to - area->cache_offset) - 1);
+		map->Unlock();
+	}
+}
+
+
+static void
+invalidate_buffer(void* owner, unsigned long first, unsigned long count)
+{
+	((BufferCache*)owner)->Invalidate(first, count);
+}
+
+
 struct BufferMapping : DoublyLinkedListLinkImpl<BufferMapping> {
 	team_id		team;
 	area_id		area;
 	addr_t		address;
-	void*		glueMapping;
+	BufferCache* cache;
 };
 
 typedef DoublyLinkedList<BufferMapping> MappingList;
@@ -209,101 +500,122 @@ struct DeviceCookie {
 };
 
 
+/*!	Ends the faults of a cache and releases the reference the mapping has.
+*/
+static void
+release_cache(BufferCache* cache)
+{
+	void* mapping = cache->Detach();
+	if (mapping != NULL)
+		lx_glue_unmap(mapping);
+	cache->ReleaseRef();
+}
+
+
 static status_t
 map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 {
-	unsigned long* pfns;
-	int caching;
-	void* mapping = lx_glue_map(cookie->file, request->offset, request->size,
-		(request->flags & 1) != 0, &pfns, &caching);
-	if (int error = lx_glue_is_error(mapping))
-		return haiku_status(error);
+	if (request->size == 0 || request->size % B_PAGE_SIZE != 0)
+		return B_BAD_VALUE;
+	page_num_t pageCount = request->size / B_PAGE_SIZE;
 
-	uint32 count = request->size / B_PAGE_SIZE;
-	generic_io_vec* vecs = new(std::nothrow) generic_io_vec[count];
-	if (vecs == NULL) {
-		lx_glue_unmap(mapping);
+	BufferCache* cache = new(std::nothrow) BufferCache;
+	if (cache == NULL)
 		return B_NO_MEMORY;
+	status_t status = cache->Init(pageCount);
+	if (status != B_OK) {
+		cache->Delete();
+		return status;
 	}
-	// merge physically contiguous pages
-	uint32 vecCount = 0;
-	for (uint32 i = 0; i < count; i++) {
-		phys_addr_t physical = (phys_addr_t)pfns[i] * B_PAGE_SIZE;
-		if (vecCount > 0 && vecs[vecCount - 1].base
-				+ vecs[vecCount - 1].length == physical) {
-			vecs[vecCount - 1].length += B_PAGE_SIZE;
-			continue;
-		}
-		vecs[vecCount].base = physical;
-		vecs[vecCount].length = B_PAGE_SIZE;
-		vecCount++;
+	void* mapping = lx_glue_map(cookie->file, request->offset, request->size,
+		(request->flags & 1) != 0, invalidate_buffer, cache);
+	if (int error = lx_glue_is_error(mapping)) {
+		cache->ReleaseRef();
+		return haiku_status(error);
+	}
+	cache->SetMapping(mapping);
+
+	uint32 protection = B_READ_AREA | B_KERNEL_READ_AREA | B_SHARED_AREA
+		| ((request->flags & 1) ? B_WRITE_AREA | B_KERNEL_WRITE_AREA : 0)
+		| ((request->flags & 2) ? B_CLONEABLE_AREA : 0);
+	team_id team = team_get_current_team_id();
+	VMAddressSpace* addressSpace = VMAddressSpace::Get(team);
+	if (addressSpace == NULL) {
+		release_cache(cache);
+		return B_BAD_TEAM_ID;
 	}
 
-	uint32 memoryType = caching == 1 ? B_WRITE_COMBINING_MEMORY
-		: caching == 0 ? B_UNCACHED_MEMORY : B_WRITE_BACK_MEMORY;
-	uint32 protection = B_READ_AREA | ((request->flags & 1) ? B_WRITE_AREA : 0)
-		| ((request->flags & 2) ? B_CLONEABLE_AREA : 0);
 	void* address = (void*)(addr_t)request->address;
-	addr_t size = request->size;
-	uint32 addressSpec = address != NULL ? B_EXACT_ADDRESS : B_ANY_ADDRESS;
-	area_id area;
-	if (vecCount == 1) {
-		area = vm_map_physical_memory(team_get_current_team_id(),
-			"drm buffer", &address, addressSpec | memoryType, size, protection,
-			vecs[0].base, false);
-	} else {
-		area = vm_map_physical_memory_vecs(team_get_current_team_id(),
-			"drm buffer", &address, addressSpec | memoryType, &size,
-			protection, vecs, vecCount);
-		if (area == B_NOT_SUPPORTED) {
-			// older kernels: the default memory type; for PCI apertures the
-			// firmware's MTRRs still make that uncached
-			address = (void*)(addr_t)request->address;
-			size = request->size;
-			area = vm_map_physical_memory_vecs(team_get_current_team_id(),
-				"drm buffer", &address, addressSpec, &size, protection, vecs,
-				vecCount);
-		}
+	virtual_address_restrictions restrictions = {};
+	restrictions.address = address;
+	restrictions.address_specification
+		= address != NULL ? B_EXACT_ADDRESS : B_ANY_ADDRESS;
+	VMArea* area;
+	addressSpace->WriteLock();
+	cache->Lock();
+	status = vm_map_cache(addressSpace, cache, 0, "drm buffer", request->size,
+		B_NO_LOCK, protection, 0, REGION_NO_PRIVATE_MAP,
+		CREATE_AREA_DONT_COMMIT_MEMORY, &restrictions, true, &area, &address);
+	area_id areaID = -1;
+	if (status == B_OK) {
+		// the area has the cache's first reference, the record another
+		area->cache_type = CACHE_TYPE_DEVICE;
+		areaID = area->id;
+		cache->AcquireRefLocked();
 	}
-#ifdef AMDGPU_DRM_ARMED_ONLY
-	phys_addr_t firstBase = vecs[0].base;
-#endif
-	delete[] vecs;
-	if (area < 0) {
-		lx_glue_unmap(mapping);
-		return area;
+	cache->Unlock();
+	addressSpace->WriteUnlock();
+	if (status != B_OK) {
+		addressSpace->Put();
+		release_cache(cache);
+		return status;
 	}
+
+	// map it all now, as far as the buffer is where the CPU reaches it;
+	// what moves later faults in again
+	addressSpace->ReadLock();
+	if (addressSpace->LookupArea((addr_t)address) == area
+		&& area->id == areaID) {
+		cache->FaultIn(addressSpace, 0, pageCount);
+	}
+	addressSpace->ReadUnlock();
+	addressSpace->Put();
 
 	BufferMapping* record = new(std::nothrow) BufferMapping;
 	if (record == NULL) {
-		delete_area(area);
-		lx_glue_unmap(mapping);
+		vm_delete_area(team, areaID, true);
+		release_cache(cache);
 		return B_NO_MEMORY;
 	}
-	record->team = team_get_current_team_id();
-	record->area = area;
+	record->team = team;
+	record->area = areaID;
 	record->address = (addr_t)address;
-	record->glueMapping = mapping;
+	record->cache = cache;
 	{
 		MutexLocker locker(cookie->lock);
 		cookie->mappings.Add(record);
 	}
 
-#ifdef AMDGPU_DRM_ARMED_ONLY
-	uint32 actualType = 0;
-	{
-		VMArea* vmArea = VMAreas::Lookup(area);
-		if (vmArea != NULL)
-			actualType = vmArea->MemoryType();
-	}
 	LAB_LOG("map 0x%" B_PRIx64 " size 0x%" B_PRIx64 ": area %" B_PRId32
-		" at 0x%lx, %" B_PRIu32 " range(s) from 0x%" B_PRIx64 ", caching %d, "
-		"memory type 0x%" B_PRIx32 "\n", request->offset, request->size, area,
-		(addr_t)address, vecCount, (uint64)firstBase, caching, actualType);
-#endif
-	request->area = area;
+		" at 0x%lx\n", request->offset, request->size, areaID,
+		(addr_t)address);
+	request->area = areaID;
 	request->address = (addr_t)address;
 	return B_OK;
+}
+
+
+static void
+remove_mapping(BufferMapping* record)
+{
+	// the team may have deleted the area itself already
+	area_info info;
+	if (get_area_info(record->area, &info) == B_OK
+		&& info.team == record->team
+		&& (addr_t)info.address == record->address)
+		vm_delete_area(record->team, record->area, true);
+	release_cache(record->cache);
+	delete record;
 }
 
 
@@ -320,15 +632,8 @@ unmap_buffer(DeviceCookie* cookie, addr_t address)
 		locker.Unlock();
 		lx_trace_calls_start();
 		LAB_LOG("unmap 0x%lx: area %" B_PRId32 "\n", address, record->area);
-		// the team may have deleted the area itself already
-		area_info info;
-		if (get_area_info(record->area, &info) == B_OK
-			&& info.team == team && (addr_t)info.address == address)
-			vm_delete_area(team, record->area, true);
-		LAB_LOG("unmap 0x%lx: area deleted\n", address);
-		lx_glue_unmap(record->glueMapping);
+		remove_mapping(record);
 		LAB_LOG("unmap 0x%lx: done\n", address);
-		delete record;
 		return B_OK;
 	}
 	return B_BAD_VALUE;
@@ -339,15 +644,8 @@ static void
 unmap_all(DeviceCookie* cookie)
 {
 	MutexLocker locker(cookie->lock);
-	while (BufferMapping* record = cookie->mappings.RemoveHead()) {
-		area_info info;
-		if (get_area_info(record->area, &info) == B_OK
-			&& info.team == record->team
-			&& (addr_t)info.address == record->address)
-			vm_delete_area(record->team, record->area, true);
-		lx_glue_unmap(record->glueMapping);
-		delete record;
-	}
+	while (BufferMapping* record = cookie->mappings.RemoveHead())
+		remove_mapping(record);
 }
 
 
