@@ -510,6 +510,62 @@ lx_haiku_log_stack(const char* what)
 }
 
 
+/*	For the watchdog: one line about thread \a id (name, state, CPU, what
+	it is blocked on) and, while it is blocked, its kernel stack, which a
+	blocked thread leaves alone (frame pointers, bounded by the stack). */
+extern "C" void
+lx_haiku_log_thread(lx_thread_id id, const char* what)
+{
+	char line[192];
+	Thread* thread = Thread::Get(id);
+	if (thread == NULL) {
+		snprintf(line, sizeof(line), "  %s: thread %" B_PRId32 " is gone\n",
+			what, (thread_id)id);
+		lx_haiku_log(line);
+		return;
+	}
+	int32 state = thread->state;
+	uint32 type = thread->wait.type;
+	const void* object = thread->wait.object;
+	cpu_ent* cpu = thread->cpu;
+	snprintf(line, sizeof(line), "  %s: thread %" B_PRId32 " (%s) state %"
+		B_PRId32 " cpu %" B_PRId32 " waits (type %" B_PRIu32 ") on %p, "
+		"anchor %#lx\n", what, thread->id, thread->name, state,
+		cpu != NULL ? cpu->cpu_num : -1, type, object,
+		(addr_t)&__cyg_profile_func_enter);
+	lx_haiku_log(line);
+	if (state == B_THREAD_WAITING && thread != thread_get_current_thread()) {
+		addr_t base = thread->kernel_stack_base;
+		addr_t top = thread->kernel_stack_top;
+		addr_t frame = thread->arch_info.GetFramePointer();
+		int length = 0;
+		line[0] = '\0';
+		for (int i = 0; i < 20; i++) {
+			if (frame < base || frame + 16 > top || (frame & 7) != 0)
+				break;
+			addr_t next = ((addr_t*)frame)[0];
+			addr_t ip = ((addr_t*)frame)[1];
+			length += snprintf(line + length, sizeof(line) - length, " %#lx",
+				ip);
+			if (length > (int)sizeof(line) - 24) {
+				strlcat(line, "\n", sizeof(line));
+				lx_haiku_log(line);
+				length = 0;
+				line[0] = '\0';
+			}
+			if (next <= frame)
+				break;
+			frame = next;
+		}
+		if (length > 0) {
+			strlcat(line, "\n", sizeof(line));
+			lx_haiku_log(line);
+		}
+	}
+	thread->ReleaseReference();
+}
+
+
 // #pragma mark - threads
 
 

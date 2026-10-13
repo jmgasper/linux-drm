@@ -25,10 +25,12 @@ struct lx_lock {
 	int depth;			/* lockdep subclass, unused */
 	long owner;			/* Haiku thread holding it, 0 if none */
 	const char *name;
+	void *owner_site;	/* where the owner locked it (for the watchdog) */
 	u64 haiku[6];		/* Haiku's mutex */
 };
 
 void lx_lock_lock(struct lx_lock *lock);
+struct lx_lock *lx_lock_waited_for(long thread);
 int lx_lock_trylock(struct lx_lock *lock);
 void lx_lock_unlock(struct lx_lock *lock);
 void lx_lock_destroy(struct lx_lock *lock);

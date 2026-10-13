@@ -38,10 +38,46 @@ lx_lock_ensure(struct lx_lock *lock)
 
 extern int hung_wait_s;
 
+/*	For the watchdog: which lock a thread is blocked on, by thread id
+	(hashed; a collision only loses that information). Written only when a
+	lock is contended. */
+#define LX_LOCK_WAITERS 1024
+static struct {
+	long thread;
+	struct lx_lock *lock;
+} lx_lock_waiters[LX_LOCK_WAITERS];
+
+
+/*	The lock \a thread is blocked on, or NULL. The lock stays valid while
+	the thread waits for it (its holder has to release it first). */
+struct lx_lock *
+lx_lock_waited_for(long thread)
+{
+	unsigned long slot = (unsigned long)thread % LX_LOCK_WAITERS;
+	struct lx_lock *lock = READ_ONCE(lx_lock_waiters[slot].lock);
+	if (lock == NULL || READ_ONCE(lx_lock_waiters[slot].thread) != thread)
+		return NULL;
+	return lock;
+}
+
+
 void
 lx_lock_lock(struct lx_lock *lock)
 {
+	unsigned long slot;
+	long self;
+
 	lx_lock_ensure(lock);
+	if (lx_haiku_mutex_trylock(lock->haiku)) {
+		WRITE_ONCE(lock->owner, lx_haiku_current_thread());
+		WRITE_ONCE(lock->owner_site, __builtin_return_address(0));
+		return;
+	}
+	self = lx_haiku_current_thread();
+	slot = (unsigned long)self % LX_LOCK_WAITERS;
+	WRITE_ONCE(lx_lock_waiters[slot].lock, NULL);
+	WRITE_ONCE(lx_lock_waiters[slot].thread, self);
+	WRITE_ONCE(lx_lock_waiters[slot].lock, lock);
 	if (hung_wait_s > 0) {
 		if (lx_haiku_mutex_lock_timeout(lock->haiku,
 				(long long)hung_wait_s * 1000000) != 0) {
@@ -55,7 +91,10 @@ lx_lock_lock(struct lx_lock *lock)
 		}
 	} else
 		lx_haiku_mutex_lock(lock->haiku);
-	WRITE_ONCE(lock->owner, lx_haiku_current_thread());
+	if (READ_ONCE(lx_lock_waiters[slot].thread) == self)
+		WRITE_ONCE(lx_lock_waiters[slot].lock, NULL);
+	WRITE_ONCE(lock->owner, self);
+	WRITE_ONCE(lock->owner_site, __builtin_return_address(0));
 }
 
 
@@ -66,6 +105,7 @@ lx_lock_trylock(struct lx_lock *lock)
 	if (!lx_haiku_mutex_trylock(lock->haiku))
 		return 0;
 	WRITE_ONCE(lock->owner, lx_haiku_current_thread());
+	WRITE_ONCE(lock->owner_site, __builtin_return_address(0));
 	return 1;
 }
 

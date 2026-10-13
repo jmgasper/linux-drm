@@ -119,15 +119,17 @@ request_threaded_irq(unsigned int irq, irq_handler_t handler,
 
 
 /*	For a watchdog: of the first interrupt handler of \a dev_id, how many
-	interrupts came and how many handler runs started, and for how long the
-	running one has been running (0 when none is). */
+	interrupts came and how many handler runs started, for how long the
+	running one has been running (0 when none is), and the Haiku thread the
+	handler runs on. */
 void
 lx_irq_stats(void *dev_id, unsigned long *arrived, unsigned long *handled,
-	u64 *running_ns)
+	u64 *running_ns, long *thread)
 {
 	struct lx_irq *desc;
 	*arrived = *handled = 0;
 	*running_ns = 0;
+	*thread = 0;
 	mutex_lock(&lx_irqs_lock);
 	list_for_each_entry(desc, &lx_irqs, entry) {
 		if (desc->dev_id != dev_id)
@@ -136,6 +138,7 @@ lx_irq_stats(void *dev_id, unsigned long *arrived, unsigned long *handled,
 		*handled = READ_ONCE(desc->handled);
 		if (READ_ONCE(desc->running))
 			*running_ns = ktime_get_ns() - READ_ONCE(desc->handler_started);
+		*thread = desc->thread->pid;
 		break;
 	}
 	mutex_unlock(&lx_irqs_lock);

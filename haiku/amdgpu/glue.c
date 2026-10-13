@@ -494,35 +494,84 @@ lx_glue_close(void *file)
  * (settings, or drmparam with log_file set) logs once a period how many
  * interrupts came and were handled, the IH ring's read pointer, the RCU
  * backlog, and the rings with work outstanding (completed/emitted fence) -
- * the last lines before the machine stopped say what the GPU was doing. */
+ * the last lines before the machine stopped say what the GPU was doing.
+ * When the interrupt handler has been running for haiku_watchdog_slow_ms
+ * (10), it also logs what the handler's thread is doing: its state and,
+ * blocked, its stack, the lock it waits for and that lock's owner (and
+ * what the owner waits for), every 50 ms while that lasts. */
 static int haiku_watchdog_ms;
 module_param(haiku_watchdog_ms, int, 0644);
+static int haiku_watchdog_slow_ms = 10;
+module_param(haiku_watchdog_slow_ms, int, 0644);
+
+static void
+lx_glue_watchdog_report(long irq_thread, u64 running_ms)
+{
+	long thread = irq_thread;
+	int depth;
+
+	pr_info("watchdog: handler running for %llu ms\n",
+		(unsigned long long)running_ms);
+	lx_haiku_log_thread(irq_thread, "handler");
+	for (depth = 0; depth < 3; depth++) {
+		struct lx_lock *lock = lx_lock_waited_for(thread);
+		long owner;
+		if (lock == NULL)
+			break;
+		owner = READ_ONCE(lock->owner);
+		pr_info("  waits for lock %s (%#lx), held by thread %ld, locked at "
+			"%#lx\n", lock->name != NULL ? lock->name : "?",
+			(unsigned long)lock, owner,
+			(unsigned long)READ_ONCE(lock->owner_site));
+		if (owner == 0 || owner == thread)
+			break;
+		lx_haiku_log_thread(owner, "owner");
+		thread = owner;
+	}
+}
+
 
 static int
 lx_glue_watchdog(void *unused)
 {
+	u64 last_line = 0;
+	int reports = 0;
+	bool incident = false;
+
 	while (!kthread_should_stop()) {
 		int period = READ_ONCE(haiku_watchdog_ms), i;
+		bool slow = false;
+		u64 now;
 		if (period <= 0) {
 			msleep(500);
 			continue;
 		}
-		msleep(period);
+		msleep(incident ? 50 : period);
+		now = ktime_get_ns();
 		for (i = 0; i < probed_count; i++) {
 			struct drm_device *dev = pci_get_drvdata(probed[i]);
 			struct amdgpu_device *adev;
 			unsigned long arrived, handled;
-			u64 running;
+			u64 running, running_ms;
+			long irq_thread;
 			char line[640];
-			int n, r;
+			int n, r, slow_ms = READ_ONCE(haiku_watchdog_slow_ms);
 
 			if (dev == NULL)
 				continue;
 			adev = drm_to_adev(dev);
-			lx_irq_stats(dev, &arrived, &handled, &running);
+			lx_irq_stats(dev, &arrived, &handled, &running, &irq_thread);
+			running_ms = running / 1000000;
+			if (slow_ms > 0 && running_ms >= (u64)slow_ms) {
+				slow = true;
+				if (reports++ < 40)
+					lx_glue_watchdog_report(irq_thread, running_ms);
+			}
+			if (now - last_line < (u64)period * 1000000 * 9 / 10)
+				continue;
 			n = scnprintf(line, sizeof(line),
 				"watchdog: irq %lu/%lu running %llu ms ih %u rcu %lu", arrived,
-				handled, (unsigned long long)(running / 1000000),
+				handled, (unsigned long long)running_ms,
 				adev->irq.ih.rptr, lx_rcu_backlog());
 			for (r = 0; r < AMDGPU_MAX_RINGS && n < (int)sizeof(line) - 48;
 					r++) {
@@ -539,6 +588,11 @@ lx_glue_watchdog(void *unused)
 			}
 			pr_info("%s\n", line);
 		}
+		if (now - last_line >= (u64)period * 1000000 * 9 / 10)
+			last_line = now;
+		if (!slow)
+			reports = 0;
+		incident = slow;
 	}
 	return 0;
 }
@@ -1122,6 +1176,18 @@ lx_glue_is_error(const void *pointer)
 
 static struct completion selftest_done;
 static atomic_t selftest_counter;
+static DEFINE_MUTEX(selftest_mutex);
+static void lx_glue_watchdog_report(long irq_thread, u64 running_ms);
+
+
+static int
+selftest_blocker(void *unused)
+{
+	mutex_lock(&selftest_mutex);
+	atomic_inc(&selftest_counter);
+	mutex_unlock(&selftest_mutex);
+	return 0;
+}
 
 static int
 selftest_thread(void *data)
@@ -1176,7 +1242,7 @@ int
 lx_glue_selftest(void)
 {
 	static DEFINE_WW_CLASS(selftest_ww_class);
-	struct task_struct *thread;
+	struct task_struct *thread, *blocker;
 	struct work_struct work;
 	struct delayed_work dwork;
 	struct timer_list timer;
@@ -1281,6 +1347,19 @@ lx_glue_selftest(void)
 	call_rcu(&rcu, selftest_rcu);
 	rcu_barrier();
 	SELFTEST(atomic_read(&selftest_counter) == 6, "call_rcu and rcu_barrier");
+
+	/* the watchdog's report on a thread blocked on a lock */
+	mutex_lock(&selftest_mutex);
+	blocker = kthread_run(selftest_blocker, NULL, "selftest blocker");
+	msleep(50);
+	SELFTEST(!IS_ERR(blocker)
+		&& lx_lock_waited_for(blocker->pid) == &selftest_mutex.l,
+		"lock waiter table");
+	if (!IS_ERR(blocker))
+		lx_glue_watchdog_report(blocker->pid, 0);
+	mutex_unlock(&selftest_mutex);
+	msleep(50);
+	SELFTEST(atomic_read(&selftest_counter) == 7, "blocked thread got the lock");
 
 	pr_info("amdgpu selftest: %d failure(s)\n", failures);
 	return failures;
