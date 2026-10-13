@@ -587,6 +587,10 @@ lx_glue_watchdog(void *unused)
 				}
 			}
 			pr_info("%s\n", line);
+			n = lx_mm_stats(line, sizeof(line));
+			n += scnprintf(line + n, sizeof(line) - n, " | ");
+			lx_haiku_resource_stats(line + n, sizeof(line) - n);
+			pr_info("watchdog: %s\n", line);
 		}
 		if (now - last_line >= (u64)period * 1000000 * 9 / 10)
 			last_line = now;

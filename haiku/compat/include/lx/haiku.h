@@ -77,6 +77,7 @@ int lx_haiku_event_wait_etc(void *event, long long timeout_us, int interrupt);
 int lx_haiku_signal_pending(int fatal_only);
 void lx_haiku_log_stack(const char *what);
 void lx_haiku_log_thread(lx_thread_id id, const char *what);
+int lx_haiku_resource_stats(char *buffer, int size);
 int lx_haiku_mutex_lock_timeout(void *mutex, long long timeout_us);
 
 /* threads */

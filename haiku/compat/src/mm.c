@@ -33,6 +33,12 @@ kmalloc_alignment(size_t size)
 }
 
 
+/* for the watchdog: what Linux code has allocated and not freed */
+static long lx_kmalloc_live, lx_kmalloc_bytes, lx_pages_live;
+static LIST_HEAD(lx_kmem_caches);
+static DEFINE_MUTEX(lx_kmem_caches_lock);
+
+
 void *
 lx_kmalloc(size_t size, gfp_t flags)
 {
@@ -53,6 +59,8 @@ lx_kmalloc(size_t size, gfp_t flags)
 	header = (struct kmalloc_header *)object - 1;
 	header->base = base;
 	header->size = size;
+	__atomic_add_fetch(&lx_kmalloc_live, 1, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&lx_kmalloc_bytes, (long)size, __ATOMIC_RELAXED);
 	if (flags & __GFP_ZERO)
 		memset(object, 0, size);
 	return object;
@@ -69,6 +77,8 @@ lx_kfree(const void *object)
 		&& lx_haiku_area_free((void *)object) == 0)
 		return;		/* vmalloc() memory passed to kvfree() */
 	header = (struct kmalloc_header *)object - 1;
+	__atomic_sub_fetch(&lx_kmalloc_live, 1, __ATOMIC_RELAXED);
+	__atomic_sub_fetch(&lx_kmalloc_bytes, (long)header->size, __ATOMIC_RELAXED);
 	lx_haiku_free(header->base);
 }
 
@@ -147,6 +157,9 @@ kmem_cache_create(const char *name, unsigned int size, unsigned int align,
 	cache->align = align;
 	cache->flags = flags;
 	cache->ctor = ctor;
+	mutex_lock(&lx_kmem_caches_lock);
+	list_add_tail(&cache->entry, &lx_kmem_caches);
+	mutex_unlock(&lx_kmem_caches_lock);
 	return cache;
 }
 
@@ -154,6 +167,11 @@ kmem_cache_create(const char *name, unsigned int size, unsigned int align,
 void
 kmem_cache_destroy(struct kmem_cache *cache)
 {
+	if (cache == NULL)
+		return;
+	mutex_lock(&lx_kmem_caches_lock);
+	list_del(&cache->entry);
+	mutex_unlock(&lx_kmem_caches_lock);
 	kfree(cache);
 }
 
@@ -162,8 +180,11 @@ void *
 kmem_cache_alloc(struct kmem_cache *cache, gfp_t flags)
 {
 	void *object = kmalloc(cache->size, flags);
-	if (object != NULL && cache->ctor != NULL)
-		cache->ctor(object);
+	if (object != NULL) {
+		__atomic_add_fetch(&cache->live, 1, __ATOMIC_RELAXED);
+		if (cache->ctor != NULL)
+			cache->ctor(object);
+	}
 	return object;
 }
 
@@ -171,7 +192,40 @@ kmem_cache_alloc(struct kmem_cache *cache, gfp_t flags)
 void
 kmem_cache_free(struct kmem_cache *cache, void *object)
 {
+	if (object != NULL)
+		__atomic_sub_fetch(&cache->live, 1, __ATOMIC_RELAXED);
 	kfree(object);
+}
+
+
+/*	For the watchdog: kmalloc() objects and bytes, pages, and the caches
+	with the most objects. */
+int
+lx_mm_stats(char *buffer, int size)
+{
+	struct kmem_cache *cache, *top[4] = {};
+	int n, i, j;
+	n = scnprintf(buffer, size, "kmalloc %ld/%ld KiB pages %ld",
+		__atomic_load_n(&lx_kmalloc_live, __ATOMIC_RELAXED),
+		__atomic_load_n(&lx_kmalloc_bytes, __ATOMIC_RELAXED) / 1024,
+		__atomic_load_n(&lx_pages_live, __ATOMIC_RELAXED));
+	mutex_lock(&lx_kmem_caches_lock);
+	list_for_each_entry(cache, &lx_kmem_caches, entry) {
+		for (i = 0; i < 4; i++) {
+			if (top[i] == NULL || READ_ONCE(cache->live) > READ_ONCE(top[i]->live)) {
+				for (j = 3; j > i; j--)
+					top[j] = top[j - 1];
+				top[i] = cache;
+				break;
+			}
+		}
+	}
+	for (i = 0; i < 4 && top[i] != NULL; i++) {
+		n += scnprintf(buffer + n, size - n, " %s %ld", top[i]->name,
+			READ_ONCE(top[i]->live));
+	}
+	mutex_unlock(&lx_kmem_caches_lock);
+	return n;
 }
 
 
@@ -278,6 +332,7 @@ lx_alloc_pages(gfp_t gfp, unsigned int order)
 	spin_lock(&page_runs_lock);
 	page_run_insert(run);
 	spin_unlock(&page_runs_lock);
+	__atomic_add_fetch(&lx_pages_live, (long)count, __ATOMIC_RELAXED);
 	return &run->pages[0];
 }
 
@@ -299,6 +354,7 @@ lx_free_pages(struct page *page, unsigned int order)
 	}
 	rb_erase(&run->node, &page_runs);
 	spin_unlock(&page_runs_lock);
+	__atomic_sub_fetch(&lx_pages_live, (long)run->count, __ATOMIC_RELAXED);
 	lx_haiku_pages_free(run->haiku_page, run->count);
 	kfree(run);
 }

@@ -510,6 +510,21 @@ lx_haiku_log_stack(const char* what)
 }
 
 
+/*	For the watchdog: the kernel's free pages and the threads, teams, ports
+	and semaphores in use. */
+extern "C" int
+lx_haiku_resource_stats(char* buffer, int size)
+{
+	system_info info;
+	if (get_system_info(&info) != B_OK)
+		return 0;
+	return snprintf(buffer, size, "free %" B_PRIu64 " MiB threads %" B_PRIu32
+		" teams %" B_PRIu32 " ports %" B_PRIu32 " sems %" B_PRIu32,
+		(uint64)(info.max_pages - info.used_pages) * B_PAGE_SIZE / 1048576,
+		info.used_threads, info.used_teams, info.used_ports, info.used_sems);
+}
+
+
 /*	For the watchdog: one line about thread \a id (name, state, CPU, what
 	it is blocked on) and, while it is blocked, its kernel stack, which a
 	blocked thread leaves alone (frame pointers, bounded by the stack). */
