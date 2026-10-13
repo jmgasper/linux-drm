@@ -1446,12 +1446,12 @@ init_driver(void)
 
 
 /*	Lab aid, with a log file only (log_file): from the end of the start
-	until the driver stops (or two minutes have passed), this thread writes
-	a line a second around the file system (lx_haiku_raw_log_prepare()), and
-	then while the log file has not grown for five seconds: the last line
-	dates a freeze of the whole machine, which leaves no other trace on the
-	lab X399. A panic shows in kdl_capture's file instead (the Haiku tree's
-	src/add-ons/kernel/debugger/kdl_capture). */
+	until the driver stops, this thread writes a heartbeat around the file
+	system into the log file's last MiB (lx_haiku_raw_log_prepare(), a ring;
+	not into the syslog), every second for two minutes and every 10 s after
+	that: the newest line dates a freeze of the whole machine, which leaves
+	no other trace on the lab X399. A panic shows in kdl_capture's file
+	instead (the Haiku tree's src/add-ons/kernel/debugger/kdl_capture). */
 static sem_id sWatchSem = -1;
 static thread_id sWatchThread = -1;
 
@@ -1459,23 +1459,16 @@ static status_t
 watch_thread(void*)
 {
 	lx_haiku_raw_log_start(find_thread(NULL));
-	int64 position = lx_haiku_log_position();
-	bigtime_t progress = system_time();
-	for (int seconds = 0; acquire_sem_etc(sWatchSem, 1, B_RELATIVE_TIMEOUT,
-			1000000) == B_TIMED_OUT; seconds++) {
-		bigtime_t now = system_time();
-		int64 at = lx_haiku_log_position();
-		if (at != position) {
-			position = at;
-			progress = now;
+	for (int beat = 0;; beat++) {
+		bigtime_t interval = beat < 120 ? 1000000 : 10000000;
+		if (acquire_sem_etc(sWatchSem, 1, B_RELATIVE_TIMEOUT, interval)
+				!= B_TIMED_OUT) {
+			break;
 		}
-		bool stalled = now - progress >= 5000000;
-		if (seconds < 120 || stalled) {
-			char line[96];
-			snprintf(line, sizeof(line), DRIVER_NAME ": watch: log at %" B_PRId64
-				"%s\n", at, stalled ? ", no progress" : "");
-			lx_haiku_log(line);
-		}
+		char line[96];
+		snprintf(line, sizeof(line), DRIVER_NAME ": watch: log at %" B_PRId64
+			"\n", lx_haiku_log_position());
+		lx_haiku_log(line);
 	}
 	return B_OK;
 }

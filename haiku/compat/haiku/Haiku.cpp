@@ -118,10 +118,12 @@ lx_haiku_log_file(const char* path)
 
 /*	A second way to the disk for the log, around the file system and its
 	caches: the log file's last MiB, written on the raw partition (and the
-	drive's cache flushed). For a watch thread's reports when file I/O itself
-	may be what waits: the messages of the thread lx_haiku_raw_log_start()
-	names go there. Only the disk's own I/O path has to work then. Prepared
-	before a stall: opening the partition then might wait as well. */
+	drive's cache flushed). For a watch thread's heartbeat when file I/O
+	itself may be what waits: the messages of the thread
+	lx_haiku_raw_log_start() names go there only (not to the syslog), with
+	the time since boot, as a ring - the newest line dates a freeze. Only
+	the disk's own I/O path has to work then. Prepared before a stall:
+	opening the partition then might wait as well. */
 static int sRawDevice = -1;
 static off_t sRawOffset;
 static off_t sRawSize;
@@ -203,11 +205,17 @@ raw_log(const char* text)
 	MutexLocker locker(sRawLock);
 	if (sRawDevice < 0)
 		return;
+	char line[192];
+	bigtime_t now = system_time();
+	snprintf(line, sizeof(line), "[%" B_PRId64 ".%03d] %s", now / 1000000,
+		(int)(now / 1000 % 1000), text);
+	text = line;
 	for (size_t length = strlen(text); length > 0;) {
 		if (sRawFill == kRawBlockSize) {
-			if (sRawBlockStart + (off_t)kRawBlockSize >= sRawSize)
-				return;
+			// a ring: the oldest block goes
 			sRawBlockStart += kRawBlockSize;
+			if (sRawBlockStart >= sRawSize)
+				sRawBlockStart = 0;
 			sRawFill = 0;
 			memset(sRawBlock, 0, kRawBlockSize);
 		}
@@ -226,12 +234,12 @@ raw_log(const char* text)
 extern "C" void
 lx_haiku_log(const char* text)
 {
-	dprintf("%s", text);
 	if (sRawThread >= 0 && are_interrupts_enabled()
 		&& thread_get_current_thread_id() == sRawThread) {
 		raw_log(text);
 		return;
 	}
+	dprintf("%s", text);
 	if (sLogFile >= 0 && are_interrupts_enabled()) {
 		// in the file, lines begin with the time since boot ("[s.ms] ")
 		static bool sLineStart = true;
