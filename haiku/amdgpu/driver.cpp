@@ -571,15 +571,20 @@ map_buffer(DeviceCookie* cookie, drm_haiku_map* request)
 		return status;
 	}
 
-	// map it all now, as far as the buffer is where the CPU reaches it;
-	// what moves later faults in again
+	// map it all now; what moves later faults in again. A buffer the CPU
+	// cannot reach fails here, as before, not at the team's first access.
 	addressSpace->ReadLock();
 	if (addressSpace->LookupArea((addr_t)address) == area
 		&& area->id == areaID) {
-		cache->FaultIn(addressSpace, 0, pageCount);
+		status = cache->FaultIn(addressSpace, 0, pageCount);
 	}
 	addressSpace->ReadUnlock();
 	addressSpace->Put();
+	if (status != B_OK) {
+		vm_delete_area(team, areaID, true);
+		release_cache(cache);
+		return status;
+	}
 
 	BufferMapping* record = new(std::nothrow) BufferMapping;
 	if (record == NULL) {

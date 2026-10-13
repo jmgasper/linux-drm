@@ -46,7 +46,7 @@ struct drm_haiku_unmap {
 struct fake_create {
 	uint64_t size;
 	uint32_t handle;
-	uint32_t pad;
+	uint32_t flags;		/* 1: its faults fail */
 	uint64_t offset;
 };
 
@@ -125,16 +125,24 @@ expect(const char* what, const volatile uint32_t* words, uint32_t seed)
 
 
 static struct fake_create
-create(void)
+create_etc(uint32_t flags)
 {
 	struct fake_create args;
 	memset(&args, 0, sizeof(args));
 	args.size = SIZE;
+	args.flags = flags;
 	if (ioctl(sFd, IOCTL_CREATE, &args, sizeof(args)) != 0) {
 		printf("create: %s\n", strerror(errno));
 		exit(1);
 	}
 	return args;
+}
+
+
+static struct fake_create
+create(void)
+{
+	return create_etc(0);
 }
 
 
@@ -314,6 +322,31 @@ main(int argc, char** argv)
 	else
 		printf("ok: unmap of an area the team deleted\n");
 	move(bo.handle);
+
+	// a buffer the CPU cannot reach: the mapping fails, and leaves no area
+	{
+		struct fake_create unreachable = create_etc(1);
+		struct drm_haiku_map args;
+		memset(&args, 0, sizeof(args));
+		args.offset = unreachable.offset;
+		args.size = SIZE;
+		args.flags = 1;
+		int32 areasBefore = 0, areasAfter = 0;
+		ssize_t cookie = 0;
+		area_info info;
+		while (get_next_area_info(B_CURRENT_TEAM, &cookie, &info) == B_OK)
+			areasBefore++;
+		int result = ioctl(sFd, IOCTL_MAP, &args, sizeof(args));
+		cookie = 0;
+		while (get_next_area_info(B_CURRENT_TEAM, &cookie, &info) == B_OK)
+			areasAfter++;
+		if (result == 0)
+			FAIL("an unreachable buffer was mapped");
+		else if (areasAfter != areasBefore)
+			FAIL("a failed mapping left %d area(s)", areasAfter - areasBefore);
+		else
+			printf("ok: unreachable buffer not mapped (%s)\n", strerror(errno));
+	}
 
 	// moves racing with accesses
 	struct fake_create race = create();

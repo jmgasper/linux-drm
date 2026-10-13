@@ -1299,7 +1299,7 @@ lx_glue_selftest(void)
 struct drm_haiku_fake_create {
 	__u64 size;
 	__u32 handle;
-	__u32 pad;
+	__u32 flags;		/* 1: the CPU cannot reach it (faults fail) */
 	__u64 offset;		/* for DRM_HAIKU_IOCTL_MAP */
 };
 
@@ -1326,6 +1326,7 @@ struct fake_bo {
 	struct list_head old;		/* earlier pages, poisoned; older ones are
 								   freed, as TTM frees them */
 	unsigned int old_count;
+	bool unreachable;
 };
 
 struct fake_old_pages {
@@ -1389,7 +1390,7 @@ fake_fault(struct vm_fault *vmf)
 	/* like TTM's: under the reservation, which a move holds */
 	if (dma_resv_lock_interruptible(bo->base.resv, NULL) != 0)
 		return VM_FAULT_NOPAGE;
-	if (page >= bo->count)
+	if (page >= bo->count || bo->unreachable)
 		result = VM_FAULT_SIGBUS;
 	else {
 		result = vmf_insert_pfn_prot(vmf->vma, vmf->address,
@@ -1425,6 +1426,7 @@ fake_create_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 	if (bo == NULL)
 		return -ENOMEM;
 	bo->count = PAGE_ALIGN(args->size) >> PAGE_SHIFT;
+	bo->unreachable = (args->flags & 1) != 0;
 	INIT_LIST_HEAD(&bo->old);
 	bo->base.funcs = &fake_gem_funcs;
 	drm_gem_private_object_init(dev, &bo->base, bo->count << PAGE_SHIFT);
