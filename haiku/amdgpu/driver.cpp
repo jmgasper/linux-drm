@@ -54,6 +54,11 @@ extern "C" {
 	status_t unregister_shutdown_hook(shutdown_hook hook, void* cookie)
 		__attribute__((weak));
 }
+// Linked against a kernel without them, the references would stay untyped
+// (NOTYPE), and a kernel that has them refuses a symbol whose type differs
+// from its own (FUNC): the driver would not load there at all.
+__asm__(".type register_shutdown_hook, @function\n"
+	".type unregister_shutdown_hook, @function");
 
 
 #define DRIVER_NAME "amdgpu_drm"
