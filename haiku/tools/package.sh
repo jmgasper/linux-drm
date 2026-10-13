@@ -20,7 +20,9 @@
 #   haiku/tools/package.sh [OUTPUT_DIR [LINUX_FIRMWARE_DIR [LICENSE]]]
 #
 # Defaults: out-packages, /lib/firmware (the host's linux-firmware, files
-# compressed or not) and its LICENSE.amdgpu. HAIKU_BUILD is the configured
+# compressed or not) and its LICENSE.amdgpu. FIRMWARE_VERSION=YYYYMMDD (and
+# FIRMWARE_REVISION, default 1) name the firmware package for a tree other
+# than the host's linux-firmware package. HAIKU_BUILD is the configured
 # Haiku build directory the driver was linked in (for the package tool and
 # the haiku version).
 set -euo pipefail
@@ -52,9 +54,16 @@ decompress() {
 }
 
 # --- firmware ----------------------------------------------------------------
-version=$(dpkg-query -W -f '${Version}' linux-firmware 2>/dev/null \
-	| sed -n 's/^\([0-9]\{8\}\).*/\1/p')
-version=${version:-$(date -u +%Y%m%d)}
+# FIRMWARE_VERSION (the linux-firmware release, YYYYMMDD) for a tree that is
+# not the host's package; FIRMWARE_REVISION is the package's revision
+if [ -n "${FIRMWARE_VERSION:-}" ]; then
+	version=$FIRMWARE_VERSION
+else
+	version=$(dpkg-query -W -f '${Version}' linux-firmware 2>/dev/null \
+		| sed -n 's/^\([0-9]\{8\}\).*/\1/p')
+	version=${version:-$(date -u +%Y%m%d)}
+fi
+revision=${FIRMWARE_REVISION:-1}
 fw=$STAGE/firmware
 mkdir -p "$fw/data/firmware/amdgpu" "$fw/data/licenses"
 count=0
@@ -77,7 +86,7 @@ done
 decompress "$LICENSE" > "$fw/data/licenses/AMD GPU Firmware"
 cat > "$fw/.PackageInfo" <<EOF
 name			amdgpu_firmwares
-version			$version-1
+version			$version-$revision
 architecture	any
 summary			"Firmware for AMD Radeon GPUs (amdgpu)"
 description		"The amdgpu firmware of linux-firmware $version ($count files), \
@@ -93,7 +102,7 @@ replaces		{ amdgpu_polaris10_firmware }
 conflicts		{ amdgpu_polaris10_firmware }
 urls			{ "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git" }
 EOF
-firmwarePackage=$OUTPUT/amdgpu_firmwares-$version-1-any.hpkg
+firmwarePackage=$OUTPUT/amdgpu_firmwares-$version-$revision-any.hpkg
 rm -f "$firmwarePackage"
 (cd "$fw" && "$TOOL" create -q "$firmwarePackage")
 echo "$firmwarePackage: $count files"
