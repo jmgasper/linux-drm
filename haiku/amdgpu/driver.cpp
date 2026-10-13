@@ -44,6 +44,18 @@
 #include "glue.h"
 
 
+// The kernel's shutdown hooks (shutdown_hooks.h), where it has them: the
+// driver still loads on kernels without (and then cannot help a warm
+// reboot of an APU).
+extern "C" {
+	typedef void (*shutdown_hook)(bool reboot, void* cookie);
+	status_t register_shutdown_hook(shutdown_hook hook, void* cookie)
+		__attribute__((weak));
+	status_t unregister_shutdown_hook(shutdown_hook hook, void* cookie)
+		__attribute__((weak));
+}
+
+
 #define DRIVER_NAME "amdgpu_drm"
 #define TRACE(x...) dprintf(DRIVER_NAME ": " x)
 
@@ -1196,6 +1208,19 @@ init_hardware(void)
 }
 
 
+static bool sShutdownHookRegistered;
+
+
+/*	The GPUs are brought to rest before the machine is powered off or
+	rebooted, as Linux does: a reboot does not reset an APU's GPU. */
+static void
+shutdown_gpus(bool reboot, void* cookie)
+{
+	TRACE("%s: shutting the GPUs down\n", reboot ? "reboot" : "power off");
+	lx_glue_shutdown();
+}
+
+
 status_t
 init_driver(void)
 {
@@ -1299,6 +1324,10 @@ init_driver(void)
 	}
 	sDeviceNames[sDeviceCount] = NULL;
 	TRACE("%d GPU(s), %d device(s)\n", gpus, sDeviceCount);
+	if (register_shutdown_hook != NULL
+		&& register_shutdown_hook(&shutdown_gpus, NULL) == B_OK) {
+		sShutdownHookRegistered = true;
+	}
 #ifdef AMDGPU_DRM_ARMED_ONLY
 	// after publish_devices(), which follows init_driver()
 	thread_id pin = spawn_kernel_thread(pin_thread, "amdgpu_drm pin",
@@ -1315,6 +1344,10 @@ init_driver(void)
 void
 uninit_driver(void)
 {
+	if (sShutdownHookRegistered) {
+		unregister_shutdown_hook(&shutdown_gpus, NULL);
+		sShutdownHookRegistered = false;
+	}
 #ifdef AMDGPU_DRM_ARMED_ONLY
 	if (sPinFile >= 0) {
 		_kern_close(sPinFile);

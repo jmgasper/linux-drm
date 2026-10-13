@@ -99,6 +99,7 @@ drm_devices(struct drm_device **devices, int max)
 
 
 static int haiku_console_test;
+static int haiku_lab_shutdown;
 static void lx_glue_console_test(void);
 static void lx_glue_watchdog_start(void);
 static void lx_glue_fence_report(void);
@@ -149,6 +150,9 @@ lx_glue_set_param(const char *name, const char *value)
 		if (error == 0 && strcmp(name, "haiku_fence_report") == 0
 			&& haiku_fence_report)
 			lx_glue_fence_report();
+		if (error == 0 && strcmp(name, "haiku_lab_shutdown") == 0
+			&& haiku_lab_shutdown)
+			lx_glue_shutdown();
 		return error;
 	}
 	pr_info("amdgpu: no parameter %s\n", name);
@@ -345,6 +349,28 @@ lx_glue_probe(int bus, int device, int function)
 	if (lab_bar_bench)
 		bar_bench(pdev, "after amdgpu", true);
 	return 0;
+}
+
+
+/* lab aid: "haiku_lab_shutdown 1" (drmparam) does what powering off does
+ * to the GPUs, for trying a warm reboot without the kernel's hook */
+module_param(haiku_lab_shutdown, int, 0644);
+
+/* What Linux does for each GPU when the machine is powered off or rebooted
+ * (amdgpu_pci_shutdown: every IP block suspended, the SMU told to unload).
+ * An APU's GPU is not reset by a warm reboot; started again from the state
+ * it was left in, it can hang the next boot's start. */
+void
+lx_glue_shutdown(void)
+{
+	int i;
+	for (i = 0; i < probed_count; i++) {
+		struct pci_dev *pdev = probed[i];
+		if (pdev->driver != NULL && pdev->driver->shutdown != NULL) {
+			pr_info("amdgpu: shutting down %s\n", pci_name(pdev));
+			pdev->driver->shutdown(pdev);
+		}
+	}
 }
 
 
