@@ -1935,7 +1935,7 @@ lx_glue_fake_device_stop(void)
  * brightness does, for the first built-in panel of the file's GPU; a
  * negative brightness only asks. */
 int
-lx_glue_backlight(void *_file, int brightness, int *current, int *maximum)
+lx_glue_backlight(void *_file, int brightness, int *_level, int *_maximum)
 {
 	struct file *filp = _file;
 	struct drm_file *file = filp->private_data;
@@ -1950,7 +1950,8 @@ lx_glue_backlight(void *_file, int brightness, int *current, int *maximum)
 
 	if (brightness >= 0)
 		error = backlight_device_set_brightness(bd, brightness);
-	*current = bd->props.brightness;
-	*maximum = bd->props.max_brightness;
+	/* not "current": Linux's macro for the running task */
+	*_level = bd->props.brightness;
+	*_maximum = bd->props.max_brightness;
 	return error;
 }
