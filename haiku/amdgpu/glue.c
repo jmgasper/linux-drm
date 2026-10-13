@@ -824,7 +824,9 @@ lx_glue_watchdog(void *unused)
 			pr_info("%s\n", line);
 			n = lx_mm_stats(line, sizeof(line));
 			n += scnprintf(line + n, sizeof(line) - n, " | ");
-			lx_haiku_resource_stats(line + n, sizeof(line) - n);
+			n += lx_haiku_resource_stats(line + n, sizeof(line) - n);
+			n += scnprintf(line + n, sizeof(line) - n, " | sites");
+			lx_kmalloc_top(line + n, sizeof(line) - n, 4);
 			pr_info("watchdog: %s\n", line);
 		}
 		if (now - last_line >= (u64)period * 1000000 * 9 / 10)
@@ -1419,6 +1421,13 @@ static DEFINE_MUTEX(selftest_mutex);
 static void lx_glue_watchdog_report(long irq_thread, u64 running_ms);
 
 
+static void *
+selftest_current(void)
+{
+	return current;
+}
+
+
 static int
 selftest_blocker(void *unused)
 {
@@ -1603,6 +1612,10 @@ lx_glue_selftest(void)
 	call_rcu(&rcu, selftest_rcu);
 	rcu_barrier();
 	SELFTEST(atomic_read(&selftest_counter) == 6, "call_rcu and rcu_barrier");
+
+	/* a thread that ended takes its task with it */
+	SELFTEST(lx_haiku_selftest_task_exit(selftest_current) == 0,
+		"task of an ended thread freed");
 
 	/* the watchdog's report on a thread blocked on a lock */
 	mutex_lock(&selftest_mutex);

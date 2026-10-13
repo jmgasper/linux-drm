@@ -666,41 +666,48 @@ lx_haiku_yield(void)
 // #pragma mark - tasks of threads
 
 
-/*	thread_id -> Linux task, an open addressing table under the global
-	spinlock. Lookups happen on every "current"; threads are few. */
+/*	thread_id -> Linux task: a hash table with chains, under a spinlock.
+	Lookups happen on every "current", so the locked part is a short chain
+	walk; nodes are allocated and freed outside the lock. (It was an open
+	addressing table whose deleted slots never became free again: once 8192
+	threads had come and gone, every lookup of a new thread walked the whole
+	table with interrupts disabled, and a full table left new threads
+	unregistered, getting a new task at every "current".) */
 
-static const int32 kTaskSlots = 8192;
-struct TaskSlot {
-	thread_id	thread;		// 0 free, -1 deleted
+struct TaskNode {
+	TaskNode*	next;
+	thread_id	thread;
 	void*		task;
 };
-static TaskSlot sTaskSlots[kTaskSlots];
+
+static const uint32 kTaskBuckets = 1024;
+static TaskNode* sTaskBuckets[kTaskBuckets];
+static spinlock sTaskLock = B_SPINLOCK_INITIALIZER;
 static void (*sTaskExitHook)(void*) = NULL;
 
 
 static inline uint32
 task_hash(thread_id thread)
 {
-	return ((uint32)thread * 2654435761u) % kTaskSlots;
+	return ((uint32)thread * 2654435761u) % kTaskBuckets;
 }
 
 
 extern "C" void*
 lx_haiku_task_lookup(lx_thread_id thread)
 {
-	unsigned long state = lx_haiku_global_lock();
-	uint32 index = task_hash(thread);
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sTaskLock);
 	void* task = NULL;
-	for (int32 i = 0; i < kTaskSlots; i++) {
-		TaskSlot& slot = sTaskSlots[(index + i) % kTaskSlots];
-		if (slot.thread == 0)
-			break;
-		if (slot.thread == thread) {
-			task = slot.task;
+	for (TaskNode* node = sTaskBuckets[task_hash(thread)]; node != NULL;
+			node = node->next) {
+		if (node->thread == thread) {
+			task = node->task;
 			break;
 		}
 	}
-	lx_haiku_global_unlock(state);
+	release_spinlock(&sTaskLock);
+	restore_interrupts(state);
 	return task;
 }
 
@@ -708,39 +715,74 @@ lx_haiku_task_lookup(lx_thread_id thread)
 extern "C" int
 lx_haiku_task_register(lx_thread_id thread, void* task)
 {
-	unsigned long state = lx_haiku_global_lock();
-	uint32 index = task_hash(thread);
-	int result = -kLinuxENOMEM;
-	for (int32 i = 0; i < kTaskSlots; i++) {
-		TaskSlot& slot = sTaskSlots[(index + i) % kTaskSlots];
-		if (slot.thread == 0 || slot.thread == -1 || slot.thread == thread) {
-			slot.thread = thread;
-			slot.task = task;
-			result = 0;
+	TaskNode* node = (TaskNode*)malloc(sizeof(TaskNode));
+	if (node == NULL)
+		return -kLinuxENOMEM;
+	node->thread = thread;
+	node->task = task;
+
+	TaskNode* replaced = NULL;
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sTaskLock);
+	TaskNode** link = &sTaskBuckets[task_hash(thread)];
+	for (; *link != NULL; link = &(*link)->next) {
+		if ((*link)->thread == thread) {
+			replaced = *link;
+			*link = replaced->next;
 			break;
 		}
 	}
-	lx_haiku_global_unlock(state);
-	return result;
+	node->next = sTaskBuckets[task_hash(thread)];
+	sTaskBuckets[task_hash(thread)] = node;
+	release_spinlock(&sTaskLock);
+	restore_interrupts(state);
+	free(replaced);
+	return 0;
 }
 
 
 extern "C" void
 lx_haiku_task_unregister(lx_thread_id thread)
 {
-	unsigned long state = lx_haiku_global_lock();
-	uint32 index = task_hash(thread);
-	for (int32 i = 0; i < kTaskSlots; i++) {
-		TaskSlot& slot = sTaskSlots[(index + i) % kTaskSlots];
-		if (slot.thread == 0)
-			break;
-		if (slot.thread == thread) {
-			slot.thread = -1;
-			slot.task = NULL;
+	TaskNode* removed = NULL;
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&sTaskLock);
+	for (TaskNode** link = &sTaskBuckets[task_hash(thread)]; *link != NULL;
+			link = &(*link)->next) {
+		if ((*link)->thread == thread) {
+			removed = *link;
+			*link = removed->next;
 			break;
 		}
 	}
-	lx_haiku_global_unlock(state);
+	release_spinlock(&sTaskLock);
+	restore_interrupts(state);
+	free(removed);
+}
+
+
+static status_t
+task_test_thread(void* data)
+{
+	void* (*getCurrent)(void) = (void* (*)(void))data;
+	return getCurrent() != NULL ? B_OK : B_ERROR;
+}
+
+
+/*	Self test: a thread that got a task ("current") and ended has none in
+	the table any more. 0 if so. */
+extern "C" int
+lx_haiku_selftest_task_exit(void* (*getCurrent)(void))
+{
+	thread_id thread = spawn_kernel_thread(task_test_thread, "lx task test",
+		B_NORMAL_PRIORITY, (void*)getCurrent);
+	if (thread < 0)
+		return -1;
+	resume_thread(thread);
+	status_t result;
+	if (wait_for_thread(thread, &result) != B_OK || result != B_OK)
+		return -1;
+	return lx_haiku_task_lookup(thread) == NULL ? 0 : -1;
 }
 
 
@@ -752,10 +794,20 @@ public:
 		int32 eventCode;
 		thread_id thread;
 		if (event->FindInt32("event", &eventCode) != B_OK
-			|| eventCode != THREAD_REMOVED
-			|| event->FindInt32("thread", &thread) != B_OK) {
+			|| eventCode != THREAD_REMOVED) {
 			return;
 		}
+		// The thread itself, not the "thread" field: Haiku's
+		// ThreadNotificationService::Notify(uint32, Thread*) passes the
+		// thread and team IDs the wrong way round (R1/beta6 included), so
+		// "thread" is the team's ID - the main thread's, whose task was then
+		// freed while it ran, and no other thread's task ever was.
+		Thread* threadStruct = NULL;
+		if (event->FindPointer("threadStruct", (void**)&threadStruct) == B_OK
+			&& threadStruct != NULL) {
+			thread = threadStruct->id;
+		} else if (event->FindInt32("thread", &thread) != B_OK)
+			return;
 		void* task = lx_haiku_task_lookup(thread);
 		if (task == NULL)
 			return;

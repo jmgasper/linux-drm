@@ -222,6 +222,7 @@ struct kmem_cache {
 };
 
 int lx_mm_stats(char *buffer, int size);
+int lx_kmalloc_top(char *buffer, int size, int count);
 void lx_kmem_cache_for_each(const char *name,
 	void (*function)(void *object, s64 age_ns, void *data), void *data);
 #define SLAB_HWCACHE_ALIGN	((__force slab_flags_t)0x00002000U)

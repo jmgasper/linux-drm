@@ -16,9 +16,13 @@
 
 /* #pragma mark - kmalloc */
 
+void __cyg_profile_func_enter(void *function, void *site)
+	__attribute__((no_instrument_function));
+
 struct kmalloc_header {
 	void *base;
 	size_t size;
+	void *site;			/* who allocated it, for lx_kmalloc_top() */
 };
 
 #define KMALLOC_MAGIC_SIZE	sizeof(struct kmalloc_header)
@@ -116,12 +120,91 @@ lx_kmem_cache_for_each(const char *name,
 }
 
 
+/*	Objects alive per call site of kmalloc() and friends (the return
+	address into the caller), for the watchdog: a leak shows as a site
+	whose count only grows. Open addressing on the site; a full table
+	counts the rest at slot 0. */
+#define LX_SITE_BITS	12
+static struct {
+	void *site;
+	long live;
+	long bytes;
+} lx_sites[1 << LX_SITE_BITS];
+
+
+static int
+lx_site_slot(void *site)
+{
+	unsigned int start = hash_ptr(site, LX_SITE_BITS), i;
+	for (i = 0; i < (1u << LX_SITE_BITS); i++) {
+		unsigned int slot = (start + i) & ((1u << LX_SITE_BITS) - 1);
+		void *current_site = __atomic_load_n(&lx_sites[slot].site,
+			__ATOMIC_ACQUIRE);
+		if (current_site == site)
+			return slot;
+		if (current_site == NULL) {
+			void *expected = NULL;
+			if (__atomic_compare_exchange_n(&lx_sites[slot].site, &expected,
+					site, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+				|| expected == site)
+				return slot;
+		}
+	}
+	return 0;
+}
+
+
+/*	The \a count sites with the most objects alive, as "offset:objects"
+	from the trace anchor (haiku/tools/symbolize-trace.sh's). */
+int
+lx_kmalloc_top(char *buffer, int size, int count)
+{
+	int top[8], n = 0, i, j, slot;
+	if (count > 8)
+		count = 8;
+	for (i = 0; i < count; i++)
+		top[i] = -1;
+	for (slot = 0; slot < (1 << LX_SITE_BITS); slot++) {
+		long live = READ_ONCE(lx_sites[slot].live);
+		if (READ_ONCE(lx_sites[slot].site) == NULL || live <= 0)
+			continue;
+		for (i = 0; i < count; i++) {
+			if (top[i] < 0 || live > READ_ONCE(lx_sites[top[i]].live)) {
+				for (j = count - 1; j > i; j--)
+					top[j] = top[j - 1];
+				top[i] = slot;
+				break;
+			}
+		}
+	}
+	for (i = 0; i < count && top[i] >= 0; i++) {
+		n += scnprintf(buffer + n, size - n, " %lx:%ld",
+			(unsigned long)lx_sites[top[i]].site
+				- (unsigned long)&__cyg_profile_func_enter,
+			READ_ONCE(lx_sites[top[i]].live));
+	}
+	return n;
+}
+
+
+static void *
+lx_kmalloc_site(size_t size, gfp_t flags, void *site);
+
+
 void *
 lx_kmalloc(size_t size, gfp_t flags)
+{
+	return lx_kmalloc_site(size, flags, __builtin_return_address(0));
+}
+
+
+static void *
+lx_kmalloc_site(size_t size, gfp_t flags, void *site)
 {
 	size_t align;
 	char *base, *object;
 	struct kmalloc_header *header;
+	int slot;
 
 	if (size == 0)
 		return ZERO_SIZE_PTR;
@@ -136,6 +219,10 @@ lx_kmalloc(size_t size, gfp_t flags)
 	header = (struct kmalloc_header *)object - 1;
 	header->base = base;
 	header->size = size;
+	header->site = site;
+	slot = lx_site_slot(site);
+	__atomic_add_fetch(&lx_sites[slot].live, 1, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&lx_sites[slot].bytes, (long)size, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&lx_kmalloc_live, 1, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&lx_kmalloc_bytes, (long)size, __ATOMIC_RELAXED);
 	if (flags & __GFP_ZERO)
@@ -154,6 +241,12 @@ lx_kfree(const void *object)
 		&& lx_haiku_area_free((void *)object) == 0)
 		return;		/* vmalloc() memory passed to kvfree() */
 	header = (struct kmalloc_header *)object - 1;
+	{
+		int slot = lx_site_slot(header->site);
+		__atomic_sub_fetch(&lx_sites[slot].live, 1, __ATOMIC_RELAXED);
+		__atomic_sub_fetch(&lx_sites[slot].bytes, (long)header->size,
+			__ATOMIC_RELAXED);
+	}
 	__atomic_sub_fetch(&lx_kmalloc_live, 1, __ATOMIC_RELAXED);
 	__atomic_sub_fetch(&lx_kmalloc_bytes, (long)header->size, __ATOMIC_RELAXED);
 	lx_haiku_free(header->base);
@@ -181,7 +274,8 @@ lx_krealloc(const void *object, size_t new_size, gfp_t flags)
 	old_size = ksize(object);
 	if (old_size >= new_size && !ZERO_OR_NULL_PTR(object))
 		return (void *)object;
-	result = lx_kmalloc(new_size, flags & ~__GFP_ZERO);
+	result = lx_kmalloc_site(new_size, flags & ~__GFP_ZERO,
+		__builtin_return_address(0));
 	if (result == NULL)
 		return NULL;
 	if (old_size > 0)
@@ -261,7 +355,8 @@ kmem_cache_destroy(struct kmem_cache *cache)
 void *
 kmem_cache_alloc(struct kmem_cache *cache, gfp_t flags)
 {
-	void *object = kmalloc(cache->size, flags);
+	void *object = lx_kmalloc_site(cache->size, flags,
+		__builtin_return_address(0));
 	if (object != NULL) {
 		__atomic_add_fetch(&cache->live, 1, __ATOMIC_RELAXED);
 		if (cache->tracked && READ_ONCE(haiku_track_objects)) {
