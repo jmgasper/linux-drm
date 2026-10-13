@@ -19,6 +19,9 @@ COMPAT := $(ROOT)/haiku/compat
 DRIVER := $(ROOT)/haiku/amdgpu
 BUILDDIR := $(ROOT)/haiku/build
 OUT ?= $(ROOT)/out
+# absolute: the dependency files name their targets that way, and a relative
+# OUT would not match them (header changes would rebuild nothing)
+override OUT := $(abspath $(OUT))
 
 HAIKU_TOP ?= /mnt/HaikuWork/x399/haiku-amdgpu
 HAIKU_BUILD ?= /mnt/HaikuWork/build/master-x86_64
