@@ -173,6 +173,11 @@ void lx_haiku_pci_write(int bus, int device, int function, int offset,
 int lx_haiku_pci_enable_msi(int bus, int device, int function);
 void lx_haiku_pci_disable_msi(int bus, int device, int function);
 
+/* ACPI firmware tables (signature, 1 for the first instance); the table
+   stays mapped */
+int lx_haiku_acpi_get_table(const char *signature, unsigned int instance,
+	void **table);
+
 /* interrupts: fn runs in interrupt context and must only wake a thread */
 void *lx_haiku_install_interrupt(unsigned int vector, void (*fn)(void *),
 	void *data);

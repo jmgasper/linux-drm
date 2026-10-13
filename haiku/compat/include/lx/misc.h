@@ -562,6 +562,7 @@ extern const struct i2c_algorithm i2c_bit_algo;
 /* ACPI */
 typedef void *acpi_handle;
 typedef u32 acpi_status;
+typedef u64 acpi_size;
 #define AE_OK		0
 #define ACPI_FAILURE(s)	((s) != AE_OK)
 #define ACPI_SUCCESS(s)	((s) == AE_OK)
@@ -577,8 +578,6 @@ typedef u32 acpi_status;
 #define acpi_video_report_nolcd()	do { } while (0)
 #define acpi_video_get_edid(adev, type, device, edid)	(-ENODEV)
 #define ACPI_VIDEO_DISPLAY_LCD	4
-#define acpi_get_table(sig, inst, table)	1
-#define acpi_put_table(table)	do { } while (0)
 struct acpi_table_header {
 	char signature[4];
 	u32 length;
@@ -590,6 +589,17 @@ struct acpi_table_header {
 	char asl_compiler_id[4];
 	u32 asl_compiler_revision;
 };
+/* Firmware tables are real: APUs and most laptops keep their VBIOS in VFCT. */
+int lx_haiku_acpi_get_table(const char *signature, unsigned int instance,
+	void **table);
+static inline acpi_status
+acpi_get_table(const char *signature, u32 instance,
+	struct acpi_table_header **table)
+{
+	return lx_haiku_acpi_get_table(signature, instance, (void **)table) == 0
+		? AE_OK : 1;
+}
+#define acpi_put_table(table)	do { } while (0)
 #define acpi_target_system_state()	0
 #define ACPI_STATE_S0	0
 #define ACPI_STATE_S3	3

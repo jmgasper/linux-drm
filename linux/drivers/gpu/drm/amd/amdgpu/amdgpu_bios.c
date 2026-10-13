@@ -25,6 +25,11 @@
  *          Alex Deucher
  *          Jerome Glisse
  */
+/*
+ * Changed for air/OS (Haiku), 2026: the VBIOS image in the ACPI VFCT table
+ * without the rest of the ACPI glue. The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 
 #include "amdgpu.h"
 #include "atom.h"
@@ -354,7 +359,7 @@ static bool amdgpu_read_disabled_bios(struct amdgpu_device *adev)
 		false : amdgpu_asic_read_disabled_bios(adev);
 }
 
-#ifdef CONFIG_ACPI
+#if defined(CONFIG_ACPI) || defined(CONFIG_HAIKU_ACPI_TABLES)
 /**
  * amdgpu_acpi_vfct_match() - Check if a VFCT entry matches the device
  * @adev: AMDGPU device

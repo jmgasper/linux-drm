@@ -8,6 +8,10 @@
 	glue, KFD compute, user pointers via HMM, vga_switcheroo, fbdev) stay off;
 	the drivers have stubs for all of them. */
 
+/* not Kconfig: the firmware tables of the ACPI glue (amdgpu: the VBIOS image
+   in VFCT, which APUs and most laptops have no other copy of) */
+#define CONFIG_HAIKU_ACPI_TABLES 1
+
 #define CONFIG_X86 1
 #define CONFIG_X86_64 1
 #define CONFIG_64BIT 1
