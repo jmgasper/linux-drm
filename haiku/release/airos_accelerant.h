@@ -13,6 +13,12 @@
 
 #include <Accelerant.h>
 
+/* asked for after the screen contents were lost (the GPU was reset) */
+enum {
+	B_WAIT_FOR_DISPLAY_RESTORE = B_GET_BRIGHTNESS + 1
+};
+typedef status_t (*wait_for_display_restore)(bigtime_t timeout);
+
 /* display outputs: the monitors one device drives, where each one sits in
    the frame buffer, and how it is scaled */
 enum {
