@@ -2,7 +2,7 @@
 # Installs amdgpu_drm for good on the X399: the release build, started at
 # boot when app_server looks for displays, with the amdgpu_kms accelerant.
 #
-#   haiku/tools/x399-install.sh [accelerant]
+#   haiku/tools/x399-install.sh [accelerant]   (a path on the workstation)
 #
 # AMDGPU_DRM_BIN names another release-configured build than out-release's
 # (a call trace build, say).
@@ -83,6 +83,7 @@ $SSH "set -e
 	if [ -n '$ACCELERANT' ]; then
 		mkdir -p $NP/add-ons/accelerants
 		cp -f '$ACCELERANT' $NP/add-ons/accelerants/amdgpu_kms.accelerant
+		chmod 755 $NP/add-ons/accelerants/amdgpu_kms.accelerant
 	elif [ -e /boot/system/add-ons/accelerants/amdgpu_kms.accelerant ]; then
 		rm -f $NP/add-ons/accelerants/amdgpu_kms.accelerant
 	elif [ ! -e $NP/add-ons/accelerants/amdgpu_kms.accelerant ]; then
