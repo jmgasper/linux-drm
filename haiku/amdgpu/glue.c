@@ -21,6 +21,7 @@
 #include <drm/drm_mode_object.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_vblank.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_plane.h>
@@ -31,6 +32,7 @@
 #include "amdgpu.h"
 #include "amdgpu_dpm.h"
 #include "amdgpu_object.h"
+#include "dc.h"
 
 #include "glue.h"
 
@@ -1940,6 +1942,55 @@ lx_glue_fake_device_stop(void)
 	drm_dev_unregister(fake_drm);
 	drm_dev_put(fake_drm);
 	fake_drm = NULL;
+}
+
+
+/* DRM_HAIKU_IOCTL_CRC: the display controller's CRC of the frames a CRTC
+ * scans out (DC's stream CRC, as amdgpu_dm_crc.c uses for debugfs, which
+ * this build does without). op 1 starts it (continuous), 2 reads the last
+ * complete frame's, 0 stops it. */
+int
+lx_glue_crc(void *_file, unsigned crtc_index, int op, unsigned *crc,
+	unsigned *_frame)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct drm_device *dev = file->minor->dev;
+	struct amdgpu_device *adev = drm_to_adev(dev);
+	struct drm_crtc *crtc = NULL, *each;
+	struct dm_crtc_state *crtc_state;
+	struct dc_stream_state *stream;
+	uint32_t r, g, b;
+	bool ok;
+
+	drm_for_each_crtc(each, dev) {
+		if (drm_crtc_index(each) == crtc_index) {
+			crtc = each;
+			break;
+		}
+	}
+	if (crtc == NULL || crtc->state == NULL)
+		return -ENODEV;
+	crtc_state = to_dm_crtc_state(crtc->state);
+	stream = crtc_state->stream;
+	if (stream == NULL)
+		return -ENODEV;
+
+	if (op == 2) {
+		if (!dc_stream_get_crc(stream->ctx->dc, stream, 0, &r, &g, &b))
+			return -EIO;
+		crc[0] = r;
+		crc[1] = g;
+		crc[2] = b;
+		*_frame = drm_crtc_vblank_count(crtc);
+		return 0;
+	}
+
+	mutex_lock(&adev->dm.dc_lock);
+	ok = dc_stream_configure_crc(stream->ctx->dc, stream, NULL, op == 1,
+		op == 1, 0, true);
+	mutex_unlock(&adev->dm.dc_lock);
+	return ok ? 0 : -EINVAL;
 }
 
 

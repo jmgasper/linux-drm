@@ -155,6 +155,14 @@ struct drm_haiku_backlight {
 };
 static const uint32 kDrmHaikuBacklight = LX_IOC(3, 'd', 0xf6,
 	sizeof(drm_haiku_backlight));
+struct drm_haiku_crc {
+	uint32	crtc_index;		// in
+	uint32	op;				// in: 0 stop, 1 start, 2 read
+	uint32	frame;			// out: the vblank count
+	uint32	crc[3];			// out
+};
+static const uint32 kDrmHaikuCrc = LX_IOC(3, 'd', 0xf7,
+	sizeof(drm_haiku_crc));
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -824,6 +832,23 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			return haiku_status(error);
 		request.brightness = current;
 		request.max_brightness = maximum;
+		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
+	}
+
+	if (op == kDrmHaikuCrc) {
+		// the frames a CRTC scans out, which the display (primary) node owns
+		if (cookie->minor >= 128)
+			return B_NOT_ALLOWED;
+		drm_haiku_crc request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		int error = lx_glue_crc(cookie->file, request.crtc_index,
+			request.op, request.crc, &request.frame);
+		if (error != 0)
+			return haiku_status(error);
 		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
 			return B_BAD_ADDRESS;
 		return B_OK;

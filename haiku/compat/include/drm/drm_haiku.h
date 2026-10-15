@@ -102,4 +102,19 @@ struct drm_haiku_backlight {
 
 #define DRM_HAIKU_IOCTL_BACKLIGHT	DRM_IOWR(0xf6, struct drm_haiku_backlight)
 
+/* The CRC the display controller computes over each frame it scans out of
+   a CRTC (what Linux offers through debugfs crtc-N/crc): with op 1 the
+   CRTC starts computing it for every frame, op 2 reads the last complete
+   frame's (three values: R/Cr, G/Y, B/Cb) with the vblank count, op 0
+   stops it. A torn frame has a CRC that is neither picture's. Primary
+   nodes only. */
+struct drm_haiku_crc {
+	__u32 crtc_index;		/* in */
+	__u32 op;				/* in: 0 stop, 1 start, 2 read */
+	__u32 frame;			/* out: the vblank count */
+	__u32 crc[3];			/* out */
+};
+
+#define DRM_HAIKU_IOCTL_CRC		DRM_IOWR(0xf7, struct drm_haiku_crc)
+
 #endif /* _DRM_HAIKU_H */

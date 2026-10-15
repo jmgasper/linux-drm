@@ -28,6 +28,8 @@ long lx_glue_ioctl(void *file, unsigned int cmd, void *arg);
 long lx_glue_read(void *file, void *buffer, unsigned long length);
 int lx_glue_force_connector(void *file, unsigned int connector_id, int force);
 int lx_glue_backlight(void *file, int brightness, int *_level, int *_maximum);
+int lx_glue_crc(void *file, unsigned crtc_index, int op, unsigned *crc,
+	unsigned *_frame);
 void *lx_glue_select(void *file, void (*notify)(void *cookie, unsigned int events),
 	void *cookie, unsigned int *ready);
 void lx_glue_deselect(void *select);
