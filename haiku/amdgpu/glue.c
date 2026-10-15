@@ -1989,6 +1989,17 @@ lx_glue_crc(void *_file, unsigned crtc_index, int op, unsigned *crc,
 	mutex_lock(&adev->dm.dc_lock);
 	ok = dc_stream_configure_crc(stream->ctx->dc, stream, NULL, op == 1,
 		op == 1, 0, true);
+	/* Temporal dithering changes the pixels every frame; as amdgpu_dm's
+	 * CRC capture, truncate instead while the CRC runs */
+	if (op == 1) {
+		dc_stream_set_dither_option(stream, DITHER_OPTION_TRUN8);
+		dc_stream_set_dyn_expansion(stream->ctx->dc, stream,
+			DYN_EXPANSION_DISABLE);
+	} else {
+		dc_stream_set_dither_option(stream, DITHER_OPTION_DEFAULT);
+		dc_stream_set_dyn_expansion(stream->ctx->dc, stream,
+			DYN_EXPANSION_AUTO);
+	}
 	mutex_unlock(&adev->dm.dc_lock);
 	return ok ? 0 : -EINVAL;
 }
