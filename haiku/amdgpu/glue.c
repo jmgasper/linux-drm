@@ -1951,8 +1951,9 @@ lx_glue_fake_device_stop(void)
  * complete frame's, 0 stops it. */
 int
 lx_glue_crc(void *_file, unsigned crtc_index, int op, unsigned *crc,
-	unsigned *_frame)
+	unsigned *_frame, const unsigned short *window)
 {
+	struct crc_params params = {}, *window_params = NULL;
 	struct file *filp = _file;
 	struct drm_file *file = filp->private_data;
 	struct drm_device *dev = file->minor->dev;
@@ -1986,9 +1987,16 @@ lx_glue_crc(void *_file, unsigned crtc_index, int op, unsigned *crc,
 		return 0;
 	}
 
+	if (op == 1 && (window[2] != 0 || window[3] != 0)) {
+		params.windowa_x_start = params.windowb_x_start = window[0];
+		params.windowa_y_start = params.windowb_y_start = window[1];
+		params.windowa_x_end = params.windowb_x_end = window[2];
+		params.windowa_y_end = params.windowb_y_end = window[3];
+		window_params = &params;
+	}
 	mutex_lock(&adev->dm.dc_lock);
-	ok = dc_stream_configure_crc(stream->ctx->dc, stream, NULL, op == 1,
-		op == 1, 0, true);
+	ok = dc_stream_configure_crc(stream->ctx->dc, stream, window_params,
+		op == 1, op == 1, 0, true);
 	/* Temporal dithering changes the pixels every frame; as amdgpu_dm's
 	 * CRC capture, truncate instead while the CRC runs */
 	if (op == 1) {

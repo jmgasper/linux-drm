@@ -160,6 +160,7 @@ struct drm_haiku_crc {
 	uint32	op;				// in: 0 stop, 1 start, 2 read
 	uint32	frame;			// out: the vblank count
 	uint32	crc[3];			// out
+	uint16	window[4];		// in, op 1: x0, y0, x1, y1; all zero: all
 };
 static const uint32 kDrmHaikuCrc = LX_IOC(3, 'd', 0xf7,
 	sizeof(drm_haiku_crc));
@@ -846,7 +847,7 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
 			return B_BAD_ADDRESS;
 		int error = lx_glue_crc(cookie->file, request.crtc_index,
-			request.op, request.crc, &request.frame);
+			request.op, request.crc, &request.frame, request.window);
 		if (error != 0)
 			return haiku_status(error);
 		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)

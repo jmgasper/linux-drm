@@ -113,6 +113,9 @@ struct drm_haiku_crc {
 	__u32 op;				/* in: 0 stop, 1 start, 2 read */
 	__u32 frame;			/* out: the vblank count */
 	__u32 crc[3];			/* out */
+	__u16 x0, y0, x1, y1;	/* in, op 1: the window of the monitor's */
+							/* pixels the CRC covers (inclusive); all */
+							/* zero: the whole frame */
 };
 
 #define DRM_HAIKU_IOCTL_CRC		DRM_IOWR(0xf7, struct drm_haiku_crc)
