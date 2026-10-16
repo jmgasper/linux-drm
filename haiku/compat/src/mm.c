@@ -500,7 +500,8 @@ page_run_create(unsigned long first_pfn, unsigned long count,
 	pool tries 2 MiB, then 1 MiB, ...) and falls back to lower orders. On
 	Haiku a failed run is a scan of every physical page with the free page
 	queues write locked, which stalls page allocation system-wide, plus a
-	syslog line; after hours of uptime nearly every such attempt fails. When
+	syslog line. Aligned runs of 1 MiB and more are rarely free, even minutes
+	after boot with most of the memory unused, so most attempts fail. When
 	a run of some order fails, no larger aligned run is free either, so these
 	requests then fail at once for a while: one second at first, doubling
 	while the retries keep failing, up to 16 seconds. A successful retry, or
