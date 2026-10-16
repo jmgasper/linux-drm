@@ -40,6 +40,7 @@ kmalloc_alignment(size_t size)
 
 /* for the watchdog: what Linux code has allocated and not freed */
 static long lx_kmalloc_live, lx_kmalloc_bytes, lx_pages_live;
+static long lx_runs_failed, lx_runs_skipped;	/* high-order runs, see below */
 static LIST_HEAD(lx_kmem_caches);
 static DEFINE_MUTEX(lx_kmem_caches_lock);
 
@@ -389,10 +390,13 @@ lx_mm_stats(char *buffer, int size)
 {
 	struct kmem_cache *cache, *top[4] = {};
 	int n, i, j;
-	n = scnprintf(buffer, size, "kmalloc %ld/%ld KiB pages %ld",
+	n = scnprintf(buffer, size,
+		"kmalloc %ld/%ld KiB pages %ld runs failed %ld skipped %ld",
 		__atomic_load_n(&lx_kmalloc_live, __ATOMIC_RELAXED),
 		__atomic_load_n(&lx_kmalloc_bytes, __ATOMIC_RELAXED) / 1024,
-		__atomic_load_n(&lx_pages_live, __ATOMIC_RELAXED));
+		__atomic_load_n(&lx_pages_live, __ATOMIC_RELAXED),
+		__atomic_load_n(&lx_runs_failed, __ATOMIC_RELAXED),
+		__atomic_load_n(&lx_runs_skipped, __ATOMIC_RELAXED));
 	mutex_lock(&lx_kmem_caches_lock);
 	list_for_each_entry(cache, &lx_kmem_caches, entry) {
 		for (i = 0; i < 4; i++) {
@@ -492,19 +496,108 @@ page_run_create(unsigned long first_pfn, unsigned long count,
 }
 
 
+/*	Linux asks for high-order runs opportunistically (__GFP_NORETRY: TTM's
+	pool tries 2 MiB, then 1 MiB, ...) and falls back to lower orders. On
+	Haiku a failed run is a scan of every physical page with the free page
+	queues write locked, which stalls page allocation system-wide, plus a
+	syslog line; after hours of uptime nearly every such attempt fails. When
+	a run of some order fails, no larger aligned run is free either, so these
+	requests then fail at once for a while: one second at first, doubling
+	while the retries keep failing, up to 16 seconds. A successful retry, or
+	freeing a run at least that large, ends it. One state per address limit
+	(any, below 4 GiB). */
+
+#define RUN_BACKOFF_FIRST_US	1000000LL
+#define RUN_BACKOFF_MAX_US		16000000LL
+#define RUN_ORDER_NONE			(MAX_PAGE_ORDER + 1)
+
+struct run_backoff {
+	unsigned int failed_order;	/* the smallest order that failed */
+	long long retry_time;
+	long long backoff;
+};
+
+static struct run_backoff run_backoffs[2] = {
+	{ RUN_ORDER_NONE, 0, 0 }, { RUN_ORDER_NONE, 0, 0 }
+};
+static DEFINE_SPINLOCK(run_backoff_lock);
+
+
+static bool
+run_backoff_skip(struct run_backoff *state, unsigned int order)
+{
+	bool skip;
+	spin_lock(&run_backoff_lock);
+	skip = order >= state->failed_order
+		&& lx_haiku_system_time() < state->retry_time;
+	spin_unlock(&run_backoff_lock);
+	return skip;
+}
+
+
+static void
+run_backoff_failed(struct run_backoff *state, unsigned int order)
+{
+	long long now = lx_haiku_system_time();
+	spin_lock(&run_backoff_lock);
+	if (now >= state->retry_time) {
+		/* the first failure, or the retry after a wait failed as well */
+		if (state->failed_order == RUN_ORDER_NONE)
+			state->backoff = RUN_BACKOFF_FIRST_US;
+		else if (state->backoff < RUN_BACKOFF_MAX_US / 2)
+			state->backoff *= 2;
+		else
+			state->backoff = RUN_BACKOFF_MAX_US;
+		state->failed_order = order;
+		state->retry_time = now + state->backoff;
+	} else if (order < state->failed_order)
+		state->failed_order = order;
+	spin_unlock(&run_backoff_lock);
+}
+
+
+/* a run of this order was allocated or freed: larger ones may be free */
+static void
+run_backoff_end(struct run_backoff *state, unsigned int order)
+{
+	spin_lock(&run_backoff_lock);
+	if (order >= state->failed_order) {
+		state->failed_order = RUN_ORDER_NONE;
+		state->retry_time = 0;
+		state->backoff = 0;
+	}
+	spin_unlock(&run_backoff_lock);
+}
+
+
 struct page *
 lx_alloc_pages(gfp_t gfp, unsigned int order)
 {
 	unsigned long count = 1UL << order;
 	unsigned long long physical;
 	unsigned long long max_address = 0;
+	struct run_backoff *backoff = NULL;
 	void *haiku_page;
 	struct page_run *run;
 
 	if (gfp & (__GFP_DMA32 | __GFP_DMA))
 		max_address = 1ULL << 32;
+	if (order > 0 && (gfp & __GFP_NORETRY) != 0) {
+		backoff = &run_backoffs[max_address != 0];
+		if (run_backoff_skip(backoff, order)) {
+			__atomic_add_fetch(&lx_runs_skipped, 1, __ATOMIC_RELAXED);
+			return NULL;
+		}
+	}
 	haiku_page = lx_haiku_pages_alloc(count, max_address,
 		(gfp & __GFP_ZERO) != 0, &physical);
+	if (backoff != NULL) {
+		if (haiku_page == NULL) {
+			__atomic_add_fetch(&lx_runs_failed, 1, __ATOMIC_RELAXED);
+			run_backoff_failed(backoff, order);
+		} else
+			run_backoff_end(backoff, order);
+	}
 	if (haiku_page == NULL)
 		return NULL;
 
@@ -540,6 +633,11 @@ lx_free_pages(struct page *page, unsigned int order)
 	spin_unlock(&page_runs_lock);
 	__atomic_sub_fetch(&lx_pages_live, (long)run->count, __ATOMIC_RELAXED);
 	lx_haiku_pages_free(run->haiku_page, run->count);
+	if (run->count > 1) {
+		/* runs are aligned to their size: one this large is free again */
+		run_backoff_end(&run_backoffs[0], run->pages[0].lx_order);
+		run_backoff_end(&run_backoffs[1], run->pages[0].lx_order);
+	}
 	kfree(run);
 }
 
