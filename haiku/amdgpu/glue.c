@@ -1576,6 +1576,30 @@ lx_glue_selftest(void)
 			vunmap(mapped);
 		__free_pages(page, 2);
 	}
+	SELFTEST(alloc_pages(GFP_KERNEL | __GFP_NORETRY, 4) == NULL,
+		"opportunistic high-order runs refused");
+	{
+		/* the pages of a 1 MiB buffer in GTT, as TTM takes them */
+		struct page **single = kcalloc(256, sizeof(*single), GFP_KERNEL);
+		u64 start = ktime_get_ns(), allocated, freed;
+		bool found = single != NULL;
+		for (i = 0; found && i < 256; i++) {
+			single[i] = alloc_page(GFP_HIGHUSER | __GFP_ZERO);
+			found = single[i] != NULL
+				&& pfn_to_page(page_to_pfn(single[i])) == single[i]
+				&& ((u32 *)page_address(single[i]))[1023] == 0;
+		}
+		allocated = ktime_get_ns();
+		while (single != NULL && i-- > 0) {
+			if (single[i] != NULL)
+				__free_page(single[i]);
+		}
+		freed = ktime_get_ns();
+		SELFTEST(found, "single pages: zeroed, found by pfn_to_page");
+		pr_info("amdgpu selftest: 256 pages allocated in %llu us, freed in "
+			"%llu us\n", (allocated - start) / 1000, (freed - allocated) / 1000);
+		kfree(single);
+	}
 
 	xa_init_flags(&xa, XA_FLAGS_ALLOC1);
 	result = xa_alloc(&xa, &id, &xa, xa_limit_32b, GFP_KERNEL);

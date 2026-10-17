@@ -122,6 +122,7 @@ void *lx_haiku_pages_alloc(unsigned long count, unsigned long long max_address,
 void lx_haiku_pages_free(void *first_page, unsigned long count);
 unsigned long long lx_haiku_total_pages(void);
 unsigned long long lx_haiku_free_pages(void);
+unsigned long long lx_haiku_ram_frames(void);	/* frame numbers below end of RAM */
 
 /* physical memory in the kernel address space */
 #define LX_HAIKU_MAP_UC	0

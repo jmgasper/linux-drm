@@ -1149,6 +1149,13 @@ lx_haiku_free_pages(void)
 }
 
 
+extern "C" unsigned long long
+lx_haiku_ram_frames(void)
+{
+	return (vm_page_max_address() + 1) / B_PAGE_SIZE;
+}
+
+
 // #pragma mark - mappings
 
 

@@ -56,7 +56,7 @@ TRACE_EXCLUDE := $(TRACE_EXCLUDE),amdgpu_device_indirect_,amdgpu_device_pcie_
 TRACE_EXCLUDE := $(TRACE_EXCLUDE),amdgpu_device_xcc_,amdgpu_cgs_,amdgpu_device_skip_hw_access
 TRACE_EXCLUDE := $(TRACE_EXCLUDE),lx_kmalloc,lx_kfree,lx_krealloc,kmem_cache_alloc
 TRACE_EXCLUDE := $(TRACE_EXCLUDE),kmem_cache_free,lx_track,lx_untrack,lx_site,ksize
-TRACE_EXCLUDE := $(TRACE_EXCLUDE),lx_pfn_to_page,lx_virt_to_phys,page_run_,lx_flush_
+TRACE_EXCLUDE := $(TRACE_EXCLUDE),lx_pfn_to_page,lx_virt_to_phys,page_slot,lx_flush_
 TRACE_EXCLUDE := $(TRACE_EXCLUDE),is_vmalloc_addr,kmalloc_alignment
 
 # --- flags -------------------------------------------------------------------

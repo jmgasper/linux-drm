@@ -40,7 +40,7 @@ kmalloc_alignment(size_t size)
 
 /* for the watchdog: what Linux code has allocated and not freed */
 static long lx_kmalloc_live, lx_kmalloc_bytes, lx_pages_live;
-static long lx_runs_failed, lx_runs_skipped;	/* high-order runs, see below */
+static long lx_runs_refused;	/* high-order runs, see lx_alloc_pages() */
 static LIST_HEAD(lx_kmem_caches);
 static DEFINE_MUTEX(lx_kmem_caches_lock);
 
@@ -391,12 +391,11 @@ lx_mm_stats(char *buffer, int size)
 	struct kmem_cache *cache, *top[4] = {};
 	int n, i, j;
 	n = scnprintf(buffer, size,
-		"kmalloc %ld/%ld KiB pages %ld runs failed %ld skipped %ld",
+		"kmalloc %ld/%ld KiB pages %ld runs refused %ld",
 		__atomic_load_n(&lx_kmalloc_live, __ATOMIC_RELAXED),
 		__atomic_load_n(&lx_kmalloc_bytes, __ATOMIC_RELAXED) / 1024,
 		__atomic_load_n(&lx_pages_live, __ATOMIC_RELAXED),
-		__atomic_load_n(&lx_runs_failed, __ATOMIC_RELAXED),
-		__atomic_load_n(&lx_runs_skipped, __ATOMIC_RELAXED));
+		__atomic_load_n(&lx_runs_refused, __ATOMIC_RELAXED));
 	mutex_lock(&lx_kmem_caches_lock);
 	list_for_each_entry(cache, &lx_kmem_caches, entry) {
 		for (i = 0; i < 4; i++) {
@@ -419,227 +418,178 @@ lx_mm_stats(char *buffer, int size)
 
 /* #pragma mark - pages */
 
-/*	Every allocation of pages is a run of physically contiguous pages with
-	an array of struct page; the runs are in an rbtree by frame number.
-	Pages that came from elsewhere (virt_to_page() of kmalloc() memory) get
-	single-page entries that stay. */
+/*	Every allocation of pages is a run of physically contiguous pages, and
+	its array of struct page is one allocation that starts with the first
+	page. pfn_to_page() finds a page of RAM through a table by frame number,
+	without a lock: a directory with a leaf for every 512 frames, a leaf
+	allocated when a frame in it is first described and then kept (at most
+	8 bytes per frame of RAM; Linux's memmap takes 64). Frames beyond the
+	end of RAM (device memory) are in an rbtree. Pages that came from
+	elsewhere (virt_to_page() of kmalloc() memory) get single-page entries
+	that stay, until the frame is allocated here. */
 
-struct page_run {
-	struct rb_node node;
-	unsigned long first_pfn;
-	unsigned long count;
-	void *haiku_page;			/* NULL: not ours to free */
-	struct page pages[];
+#define PAGE_LEAF_BITS		9
+#define PAGE_LEAF_FRAMES	(1UL << PAGE_LEAF_BITS)
+
+struct page_leaf {
+	struct page *pages[PAGE_LEAF_FRAMES];
 };
 
-static struct rb_root page_runs = RB_ROOT;
-static DEFINE_SPINLOCK(page_runs_lock);
+static struct page_leaf **page_directory;
+static unsigned long page_frames;		/* the frames the directory covers */
+static DEFINE_MUTEX(page_directory_lock);
+
+struct device_page {
+	struct rb_node node;
+	unsigned long pfn;
+	struct page page;
+};
+
+static struct rb_root device_pages = RB_ROOT;
+static DEFINE_SPINLOCK(device_pages_lock);
 struct page *lx_zero_page;
 
 
-static struct page_run *
-page_run_find(unsigned long pfn)
+static struct page_leaf **
+page_directory_get(void)
 {
-	struct rb_node *node = page_runs.rb_node;
-	while (node != NULL) {
-		struct page_run *run = rb_entry(node, struct page_run, node);
-		if (pfn < run->first_pfn)
-			node = node->rb_left;
-		else if (pfn >= run->first_pfn + run->count)
-			node = node->rb_right;
-		else
-			return run;
+	struct page_leaf **directory = smp_load_acquire(&page_directory);
+	if (directory != NULL)
+		return directory;
+
+	mutex_lock(&page_directory_lock);
+	directory = page_directory;
+	if (directory == NULL) {
+		unsigned long frames = lx_haiku_ram_frames();
+		directory = vzalloc(DIV_ROUND_UP(frames, PAGE_LEAF_FRAMES)
+			* sizeof(*directory));
+		if (directory != NULL) {
+			page_frames = frames;
+			smp_store_release(&page_directory, directory);
+		}
 	}
-	return NULL;
+	mutex_unlock(&page_directory_lock);
+	return directory;
 }
 
 
-static void
-page_run_insert(struct page_run *run)
+/*	The table entry of frame \a pfn, its leaf allocated if \a create is set;
+	NULL for frames beyond RAM, or without a leaf. */
+static struct page **
+page_slot(unsigned long pfn, bool create)
 {
-	struct rb_node **link = &page_runs.rb_node, *parent = NULL;
-	while (*link != NULL) {
-		struct page_run *other = rb_entry(*link, struct page_run, node);
-		parent = *link;
-		if (run->first_pfn < other->first_pfn)
-			link = &(*link)->rb_left;
-		else
-			link = &(*link)->rb_right;
-	}
-	rb_link_node(&run->node, parent, link);
-	rb_insert_color(&run->node, &page_runs);
-}
+	struct page_leaf **directory = page_directory_get();
+	struct page_leaf *leaf, *other;
 
-
-static struct page_run *
-page_run_create(unsigned long first_pfn, unsigned long count,
-	void *haiku_page, unsigned int order)
-{
-	struct page_run *run = kzalloc(struct_size(run, pages, count), GFP_KERNEL);
-	unsigned long i;
-	if (run == NULL)
+	if (directory == NULL || pfn >= page_frames)
 		return NULL;
-	run->first_pfn = first_pfn;
-	run->count = count;
-	run->haiku_page = haiku_page;
-	for (i = 0; i < count; i++) {
-		struct page *page = &run->pages[i];
-		page->lx_phys = PFN_PHYS(first_pfn + i);
-		page->lx_haiku_page = haiku_page;
-		page->lx_head = &run->pages[0];
-		atomic_set(&page->_refcount, 1);
-		INIT_LIST_HEAD(&page->lru);
+	leaf = READ_ONCE(directory[pfn >> PAGE_LEAF_BITS]);
+	if (leaf == NULL) {
+		if (!create)
+			return NULL;
+		leaf = kzalloc(sizeof(*leaf), GFP_KERNEL);
+		if (leaf == NULL)
+			return NULL;
+		other = cmpxchg(&directory[pfn >> PAGE_LEAF_BITS], NULL, leaf);
+		if (other != NULL) {
+			kfree(leaf);
+			leaf = other;
+		}
 	}
-	run->pages[0].lx_order = order;
-	run->pages[0].lx_count = count;
-	return run;
-}
-
-
-/*	Linux asks for high-order runs opportunistically (__GFP_NORETRY: TTM's
-	pool tries 2 MiB, then 1 MiB, ...) and falls back to lower orders. On
-	Haiku a failed run is a scan of every physical page with the free page
-	queues write locked, which stalls page allocation system-wide, plus a
-	syslog line. Aligned runs of 1 MiB and more are rarely free, even minutes
-	after boot with most of the memory unused, so most attempts fail. When
-	a run of some order fails, no larger aligned run is free either, so these
-	requests then fail at once for a while: one second at first, doubling
-	while the retries keep failing, up to 16 seconds. A successful retry, or
-	freeing a run at least that large, ends it. One state per address limit
-	(any, below 4 GiB). */
-
-#define RUN_BACKOFF_FIRST_US	1000000LL
-#define RUN_BACKOFF_MAX_US		16000000LL
-#define RUN_ORDER_NONE			(MAX_PAGE_ORDER + 1)
-
-struct run_backoff {
-	unsigned int failed_order;	/* the smallest order that failed */
-	long long retry_time;
-	long long backoff;
-};
-
-static struct run_backoff run_backoffs[2] = {
-	{ RUN_ORDER_NONE, 0, 0 }, { RUN_ORDER_NONE, 0, 0 }
-};
-static DEFINE_SPINLOCK(run_backoff_lock);
-
-
-static bool
-run_backoff_skip(struct run_backoff *state, unsigned int order)
-{
-	bool skip;
-	spin_lock(&run_backoff_lock);
-	skip = order >= state->failed_order
-		&& lx_haiku_system_time() < state->retry_time;
-	spin_unlock(&run_backoff_lock);
-	return skip;
+	return &leaf->pages[pfn & (PAGE_LEAF_FRAMES - 1)];
 }
 
 
 static void
-run_backoff_failed(struct run_backoff *state, unsigned int order)
+page_init(struct page *page, unsigned long pfn, void *haiku_page,
+	struct page *head)
 {
-	long long now = lx_haiku_system_time();
-	spin_lock(&run_backoff_lock);
-	if (now >= state->retry_time) {
-		/* the first failure, or the retry after a wait failed as well */
-		if (state->failed_order == RUN_ORDER_NONE)
-			state->backoff = RUN_BACKOFF_FIRST_US;
-		else if (state->backoff < RUN_BACKOFF_MAX_US / 2)
-			state->backoff *= 2;
-		else
-			state->backoff = RUN_BACKOFF_MAX_US;
-		state->failed_order = order;
-		state->retry_time = now + state->backoff;
-	} else if (order < state->failed_order)
-		state->failed_order = order;
-	spin_unlock(&run_backoff_lock);
-}
-
-
-/* a run of this order was allocated or freed: larger ones may be free */
-static void
-run_backoff_end(struct run_backoff *state, unsigned int order)
-{
-	spin_lock(&run_backoff_lock);
-	if (order >= state->failed_order) {
-		state->failed_order = RUN_ORDER_NONE;
-		state->retry_time = 0;
-		state->backoff = 0;
-	}
-	spin_unlock(&run_backoff_lock);
+	page->lx_phys = PFN_PHYS(pfn);
+	page->lx_haiku_page = haiku_page;
+	page->lx_head = head;
+	atomic_set(&page->_refcount, 1);
+	INIT_LIST_HEAD(&page->lru);
 }
 
 
 struct page *
 lx_alloc_pages(gfp_t gfp, unsigned int order)
 {
-	unsigned long count = 1UL << order;
+	unsigned long count = 1UL << order, pfn, i;
 	unsigned long long physical;
 	unsigned long long max_address = 0;
-	struct run_backoff *backoff = NULL;
+	struct page *pages;
 	void *haiku_page;
-	struct page_run *run;
+
+	/*	Linux asks for high-order runs opportunistically (__GFP_NORETRY:
+		TTM's pool tries 2 MiB, then 1 MiB, ..., down to single pages). Haiku
+		has no buddy allocator: a run is a search through all of its pages
+		from the start, with the free page queues write locked, so every page
+		fault and page allocation in the system waits for it, whether it
+		finds a run or not. It took 2.3 ms for each 1 MiB buffer in GTT on
+		the Framework 13 (jmgasper/haiku#36). These requests fail at once,
+		and the caller takes single pages. Runs it cannot do without (DMA
+		buffers) still search. */
+	if (order > 0 && (gfp & __GFP_NORETRY) != 0) {
+		__atomic_add_fetch(&lx_runs_refused, 1, __ATOMIC_RELAXED);
+		return NULL;
+	}
 
 	if (gfp & (__GFP_DMA32 | __GFP_DMA))
 		max_address = 1ULL << 32;
-	if (order > 0 && (gfp & __GFP_NORETRY) != 0) {
-		backoff = &run_backoffs[max_address != 0];
-		if (run_backoff_skip(backoff, order)) {
-			__atomic_add_fetch(&lx_runs_skipped, 1, __ATOMIC_RELAXED);
-			return NULL;
-		}
-	}
+	pages = kcalloc(count, sizeof(*pages), GFP_KERNEL);
+	if (pages == NULL)
+		return NULL;
 	haiku_page = lx_haiku_pages_alloc(count, max_address,
 		(gfp & __GFP_ZERO) != 0, &physical);
-	if (backoff != NULL) {
-		if (haiku_page == NULL) {
-			__atomic_add_fetch(&lx_runs_failed, 1, __ATOMIC_RELAXED);
-			run_backoff_failed(backoff, order);
-		} else
-			run_backoff_end(backoff, order);
-	}
-	if (haiku_page == NULL)
+	if (haiku_page == NULL) {
+		kfree(pages);
 		return NULL;
+	}
 
-	run = page_run_create(physical >> PAGE_SHIFT, count, haiku_page, order);
-	if (run == NULL) {
-		lx_haiku_pages_free(haiku_page, count);
-		return NULL;
+	pfn = physical >> PAGE_SHIFT;
+	for (i = 0; i < count; i++) {
+		struct page **slot = page_slot(pfn + i, true);
+		if (slot == NULL) {
+			while (i-- > 0)
+				WRITE_ONCE(*page_slot(pfn + i, false), NULL);
+			lx_haiku_pages_free(haiku_page, count);
+			kfree(pages);
+			return NULL;
+		}
+		page_init(&pages[i], pfn + i, haiku_page, pages);
+		/* an entry from virt_to_page() before Haiku freed the frame is
+		   replaced, and left to whoever still has it */
+		WRITE_ONCE(*slot, &pages[i]);
 	}
-	spin_lock(&page_runs_lock);
-	page_run_insert(run);
-	spin_unlock(&page_runs_lock);
+	pages[0].lx_order = order;
+	pages[0].lx_count = count;
 	__atomic_add_fetch(&lx_pages_live, (long)count, __ATOMIC_RELAXED);
-	return &run->pages[0];
+	return pages;
 }
 
 
 void
 lx_free_pages(struct page *page, unsigned int order)
 {
-	struct page_run *run;
+	unsigned long pfn, count, i;
+	struct page **slot;
+
 	if (page == NULL)
 		return;
-	spin_lock(&page_runs_lock);
-	run = page_run_find(page_to_pfn(page));
-	if (run == NULL || run->haiku_page == NULL
-		|| &run->pages[0] != page) {
-		spin_unlock(&page_runs_lock);
-		WARN(1, "freeing pages that were not allocated (pfn %lx)\n",
-			page_to_pfn(page));
+	pfn = page_to_pfn(page);
+	slot = page_slot(pfn, false);
+	if (slot == NULL || READ_ONCE(*slot) != page || page->lx_head != page
+		|| page->lx_haiku_page == NULL) {
+		WARN(1, "freeing pages that were not allocated (pfn %lx)\n", pfn);
 		return;
 	}
-	rb_erase(&run->node, &page_runs);
-	spin_unlock(&page_runs_lock);
-	__atomic_sub_fetch(&lx_pages_live, (long)run->count, __ATOMIC_RELAXED);
-	lx_haiku_pages_free(run->haiku_page, run->count);
-	if (run->count > 1) {
-		/* runs are aligned to their size: one this large is free again */
-		run_backoff_end(&run_backoffs[0], run->pages[0].lx_order);
-		run_backoff_end(&run_backoffs[1], run->pages[0].lx_order);
-	}
-	kfree(run);
+	count = page->lx_count;
+	for (i = 0; i < count; i++)
+		WRITE_ONCE(*page_slot(pfn + i, false), NULL);
+	__atomic_sub_fetch(&lx_pages_live, (long)count, __ATOMIC_RELAXED);
+	lx_haiku_pages_free(page->lx_haiku_page, count);
+	kfree(page);
 }
 
 
@@ -654,28 +604,87 @@ put_page(struct page *page)
 }
 
 
+static struct page *
+device_page_find(unsigned long pfn)
+{
+	struct rb_node *node = device_pages.rb_node;
+	while (node != NULL) {
+		struct device_page *entry = rb_entry(node, struct device_page, node);
+		if (pfn < entry->pfn)
+			node = node->rb_left;
+		else if (pfn > entry->pfn)
+			node = node->rb_right;
+		else
+			return &entry->page;
+	}
+	return NULL;
+}
+
+
+/* a frame beyond RAM: described from its first lookup on */
+static struct page *
+device_page(unsigned long pfn)
+{
+	struct rb_node **link = &device_pages.rb_node, *parent = NULL;
+	struct device_page *entry;
+	struct page *page;
+
+	spin_lock(&device_pages_lock);
+	page = device_page_find(pfn);
+	spin_unlock(&device_pages_lock);
+	if (page != NULL)
+		return page;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (entry == NULL)
+		return NULL;
+	entry->pfn = pfn;
+	page_init(&entry->page, pfn, NULL, &entry->page);
+	spin_lock(&device_pages_lock);
+	page = device_page_find(pfn);
+	if (page == NULL) {
+		while (*link != NULL) {
+			struct device_page *other
+				= rb_entry(*link, struct device_page, node);
+			parent = *link;
+			link = pfn < other->pfn ? &(*link)->rb_left : &(*link)->rb_right;
+		}
+		rb_link_node(&entry->node, parent, link);
+		rb_insert_color(&entry->node, &device_pages);
+		page = &entry->page;
+		entry = NULL;
+	}
+	spin_unlock(&device_pages_lock);
+	kfree(entry);
+	return page;
+}
+
+
 struct page *
 lx_pfn_to_page(unsigned long pfn)
 {
-	struct page_run *run;
-	spin_lock(&page_runs_lock);
-	run = page_run_find(pfn);
-	if (run == NULL) {
-		/* a page we did not allocate: describe it from now on */
-		spin_unlock(&page_runs_lock);
-		run = page_run_create(pfn, 1, NULL, 0);
-		if (run == NULL)
-			return NULL;
-		spin_lock(&page_runs_lock);
-		if (page_run_find(pfn) == NULL)
-			page_run_insert(run);
-		else {
-			kfree(run);
-			run = page_run_find(pfn);
-		}
+	struct page **slot, *page, *other;
+
+	if (page_directory_get() != NULL && pfn >= page_frames)
+		return device_page(pfn);
+	slot = page_slot(pfn, true);
+	if (slot == NULL)
+		return NULL;
+	page = READ_ONCE(*slot);
+	if (page != NULL)
+		return page;
+
+	/* a page we did not allocate: describe it from now on */
+	page = kzalloc(sizeof(*page), GFP_KERNEL);
+	if (page == NULL)
+		return NULL;
+	page_init(page, pfn, NULL, page);
+	other = cmpxchg(slot, NULL, page);
+	if (other != NULL) {
+		kfree(page);
+		return other;
 	}
-	spin_unlock(&page_runs_lock);
-	return &run->pages[pfn - run->first_pfn];
+	return page;
 }
 
 
