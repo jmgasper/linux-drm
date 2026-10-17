@@ -30,6 +30,20 @@ int lx_glue_force_connector(void *file, unsigned int connector_id, int force);
 int lx_glue_backlight(void *file, int brightness, int *_level, int *_maximum);
 int lx_glue_crc(void *file, unsigned crtc_index, int op, unsigned *crc,
 	unsigned *_frame, const unsigned short *window);
+
+/* DRM_HAIKU_IOCTL_SCANOUT, as struct drm_haiku_scanout */
+struct lx_glue_scanout_args {
+	unsigned int op;
+	unsigned int handle;
+	unsigned int width;
+	unsigned int height;
+	unsigned int pitch;
+	unsigned int format;
+	unsigned int generation;
+	unsigned int reserved;
+	unsigned long long size;
+};
+int lx_glue_scanout(void *file, struct lx_glue_scanout_args *args);
 void *lx_glue_select(void *file, void (*notify)(void *cookie, unsigned int events),
 	void *cookie, unsigned int *ready);
 void lx_glue_deselect(void *select);

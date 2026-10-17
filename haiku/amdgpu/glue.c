@@ -14,6 +14,7 @@
 #include <drm/drm_device.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_file.h>
+#include <drm/drm_haiku.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_vma_manager.h>
@@ -529,10 +530,15 @@ lx_glue_open(int minor, int flags, int *_error)
 }
 
 
+static void lx_scanout_file_closing(struct drm_file *file);
+
 void
 lx_glue_close(void *file)
 {
+	struct file *filp = file;
 	lx_trace_calls_start();
+	if (atomic_long_read(&filp->f_count) == 1)
+		lx_scanout_file_closing(filp->private_data);
 	fput(file);
 }
 
@@ -2052,6 +2058,150 @@ lx_glue_crc(void *_file, unsigned crtc_index, int op, unsigned *crc,
 	}
 	mutex_unlock(&adev->dm.dc_lock);
 	return ok ? 0 : -EINVAL;
+}
+
+
+/* #pragma mark - the screen's frame buffer */
+
+/*	DRM_HAIKU_IOCTL_SCANOUT: the buffer the screen shows, for a renderer that
+	copies its finished frames straight into it (VkImportScanoutMemoryHAIKU)
+	instead of handing them to app_server, which would copy them there from
+	system memory. The accelerant publishes the buffer it scans out from;
+	another client gets a handle to it on its own file, as GEM_OPEN of a
+	flink name would give one (which render nodes may not use). One buffer
+	per GPU: amdgpu_kms has one frame buffer for all monitors. */
+
+struct lx_scanout {
+	struct drm_device *dev;
+	struct drm_file *publisher;
+	struct drm_gem_object *object;
+	u32 width, height, pitch, format;
+	u32 generation;
+};
+
+#define LX_SCANOUT_DEVICES	4
+static struct lx_scanout lx_scanouts[LX_SCANOUT_DEVICES];
+static u32 lx_scanout_generation;
+static DEFINE_MUTEX(lx_scanout_lock);
+
+
+static struct lx_scanout *
+lx_scanout_of(struct drm_device *dev, bool create)
+{
+	struct lx_scanout *unused = NULL;
+	int i;
+	for (i = 0; i < LX_SCANOUT_DEVICES; i++) {
+		if (lx_scanouts[i].dev == dev)
+			return &lx_scanouts[i];
+		if (lx_scanouts[i].dev == NULL && unused == NULL)
+			unused = &lx_scanouts[i];
+	}
+	if (!create || unused == NULL)
+		return NULL;
+	unused->dev = dev;
+	return unused;
+}
+
+
+static void
+lx_scanout_withdraw(struct lx_scanout *scanout)
+{
+	if (scanout->object != NULL)
+		drm_gem_object_put(scanout->object);
+	scanout->object = NULL;
+	scanout->publisher = NULL;
+	scanout->generation = ++lx_scanout_generation;
+}
+
+
+/* the publisher's file is closing: its buffer is no longer the screen's */
+static void
+lx_scanout_file_closing(struct drm_file *file)
+{
+	int i;
+	if (file == NULL)
+		return;
+	mutex_lock(&lx_scanout_lock);
+	for (i = 0; i < LX_SCANOUT_DEVICES; i++) {
+		if (lx_scanouts[i].publisher == file)
+			lx_scanout_withdraw(&lx_scanouts[i]);
+	}
+	mutex_unlock(&lx_scanout_lock);
+}
+
+
+int
+lx_glue_scanout(void *_file, struct lx_glue_scanout_args *args)
+{
+	struct file *filp = _file;
+	struct drm_file *file = filp->private_data;
+	struct drm_device *dev = file->minor->dev;
+	struct drm_gem_object *object = NULL;
+	struct lx_scanout *scanout;
+	int error = 0;
+
+	if (args->op == DRM_HAIKU_SCANOUT_PUBLISH) {
+		if (file->minor->type != DRM_MINOR_PRIMARY)
+			return -EACCES;
+		if (args->width == 0 || args->height == 0
+			|| args->pitch < args->width * 4)
+			return -EINVAL;
+		object = drm_gem_object_lookup(file, args->handle);
+		if (object == NULL)
+			return -ENOENT;
+		if ((u64)args->pitch * args->height > object->size) {
+			drm_gem_object_put(object);
+			return -EINVAL;
+		}
+	} else if (args->op == DRM_HAIKU_SCANOUT_WITHDRAW) {
+		if (file->minor->type != DRM_MINOR_PRIMARY)
+			return -EACCES;
+	} else if (args->op != DRM_HAIKU_SCANOUT_GET)
+		return -EINVAL;
+
+	mutex_lock(&lx_scanout_lock);
+	scanout = lx_scanout_of(dev, args->op == DRM_HAIKU_SCANOUT_PUBLISH);
+	switch (args->op) {
+		case DRM_HAIKU_SCANOUT_PUBLISH:
+			if (scanout == NULL) {
+				drm_gem_object_put(object);
+				error = -ENOSPC;
+				break;
+			}
+			lx_scanout_withdraw(scanout);
+			scanout->object = object;
+			scanout->publisher = file;
+			scanout->width = args->width;
+			scanout->height = args->height;
+			scanout->pitch = args->pitch;
+			scanout->format = args->format;
+			args->generation = scanout->generation;
+			break;
+		case DRM_HAIKU_SCANOUT_WITHDRAW:
+			if (scanout != NULL && scanout->publisher == file) {
+				lx_scanout_withdraw(scanout);
+				args->generation = scanout->generation;
+			}
+			break;
+		case DRM_HAIKU_SCANOUT_GET:
+			if (scanout == NULL || scanout->object == NULL) {
+				error = -ENOENT;
+				break;
+			}
+			error = drm_gem_handle_create(file, scanout->object,
+				&args->handle);
+			if (error != 0)
+				break;
+			args->width = scanout->width;
+			args->height = scanout->height;
+			args->pitch = scanout->pitch;
+			args->format = scanout->format;
+			args->size = scanout->object->size;
+			args->generation = scanout->generation;
+			break;
+	}
+	mutex_unlock(&lx_scanout_lock);
+	return error;
 }
 
 
