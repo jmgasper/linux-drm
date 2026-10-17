@@ -27,6 +27,7 @@
 #include <drm/drm_plane.h>
 #include <drm/gpu_scheduler.h>
 #include <linux/dma-resv.h>
+#include <linux/interval_tree_generic.h>
 #include <drm/ttm/ttm_resource.h>
 
 #include "amdgpu.h"
@@ -1244,18 +1245,30 @@ lx_glue_deselect(void *_select)
 	driver then unmaps the pages from every team, which fault them in again
 	at the buffer's new place. Without that, a team would keep writing to
 	the pages the buffer had before: VRAM another buffer has now, or memory
-	Haiku has given back to someone else. */
+	Haiku has given back to someone else. TTM does so for every buffer it
+	destroys as well, so the mappings are in an interval tree by the pages
+	of the fake offsets they map: walking all of them, every mapped buffer
+	of every team, cost 0.13 ms per buffer (jmgasper/haiku#36). */
 
 struct lx_mapping {
 	struct vm_area_struct vma;
 	struct lx_vma_pages *pages;
-	struct list_head entry;		/* in lx_mappings while attached */
+	struct rb_node node;		/* in lx_mappings while attached */
+	unsigned long first, last;	/* the fake offsets' pages it maps */
+	unsigned long subtree_last;
+	bool attached;
 	struct mutex fault_lock;	/* faults share pages->pfns */
 	void (*invalidate)(void *owner, unsigned long first, unsigned long count);
 	void *owner;
 };
 
-static LIST_HEAD(lx_mappings);
+#define LX_MAPPING_FIRST(mapping)	((mapping)->first)
+#define LX_MAPPING_LAST(mapping)	((mapping)->last)
+
+INTERVAL_TREE_DEFINE(struct lx_mapping, node, unsigned long, subtree_last,
+	LX_MAPPING_FIRST, LX_MAPPING_LAST, static, lx_mapping_tree)
+
+static struct rb_root_cached lx_mappings = RB_ROOT_CACHED;
 static DEFINE_MUTEX(lx_mappings_lock);
 
 
@@ -1267,21 +1280,22 @@ lx_glue_unmap_mapping_range(struct address_space *as, loff_t start,
 	loff_t length)
 {
 	unsigned long first = start >> PAGE_SHIFT;
-	unsigned long end = length == 0 ? ULONG_MAX
-		: (unsigned long)((start + length + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	unsigned long last = length == 0 ? ULONG_MAX
+		: (unsigned long)((start + length + PAGE_SIZE - 1) >> PAGE_SHIFT) - 1;
 	struct lx_mapping *mapping;
 
+	if (last < first)
+		return;
 	mutex_lock(&lx_mappings_lock);
-	list_for_each_entry(mapping, &lx_mappings, entry) {
-		unsigned long mapFirst = mapping->vma.vm_pgoff;
-		unsigned long mapEnd = mapFirst + mapping->pages->count;
-		unsigned long from, to;
+	for (mapping = lx_mapping_tree_iter_first(&lx_mappings, first, last);
+			mapping != NULL;
+			mapping = lx_mapping_tree_iter_next(mapping, first, last)) {
+		unsigned long from = max(first, mapping->first);
+		unsigned long to = min(last, mapping->last);
 		if (as != NULL && mapping->vma.vm_file->f_mapping != as)
 			continue;
-		from = max(first, mapFirst);
-		to = min(end, mapEnd);
-		if (from < to)
-			mapping->invalidate(mapping->owner, from - mapFirst, to - from);
+		mapping->invalidate(mapping->owner, from - mapping->first,
+			to - from + 1);
 	}
 	mutex_unlock(&lx_mappings_lock);
 }
@@ -1316,7 +1330,6 @@ lx_glue_map(void *_file, unsigned long long offset, unsigned long size,
 		return ERR_PTR(-ENOMEM);
 	}
 	mapping->pages->count = count;
-	INIT_LIST_HEAD(&mapping->entry);
 	mutex_init(&mapping->fault_lock);
 	mapping->invalidate = invalidate;
 	mapping->owner = owner;
@@ -1338,8 +1351,11 @@ lx_glue_map(void *_file, unsigned long long offset, unsigned long size,
 		goto err_close;
 	}
 
+	mapping->first = mapping->vma.vm_pgoff;
+	mapping->last = mapping->first + count - 1;
 	mutex_lock(&lx_mappings_lock);
-	list_add_tail(&mapping->entry, &lx_mappings);
+	lx_mapping_tree_insert(mapping, &lx_mappings);
+	mapping->attached = true;
 	mutex_unlock(&lx_mappings_lock);
 	return mapping;
 
@@ -1423,8 +1439,10 @@ lx_glue_map_detach(void *_mapping)
 {
 	struct lx_mapping *mapping = _mapping;
 	mutex_lock(&lx_mappings_lock);
-	if (!list_empty(&mapping->entry))
-		list_del_init(&mapping->entry);
+	if (mapping->attached) {
+		lx_mapping_tree_remove(mapping, &lx_mappings);
+		mapping->attached = false;
+	}
 	mutex_unlock(&lx_mappings_lock);
 }
 
