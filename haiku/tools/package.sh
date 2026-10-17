@@ -26,7 +26,8 @@
 # driver package's revision, for a rebuild of the same commit date that has
 # to replace an installed package. HAIKU_BUILD is the configured
 # Haiku build directory the driver was linked in (for the package tool and
-# the haiku version).
+# the haiku version). BIN is the driver to package (default out-release/
+# amdgpu_drm).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUTPUT=${1:-$ROOT/out-packages}
@@ -35,7 +36,7 @@ LICENSE=${3:-/usr/share/doc/linux-firmware/licenses/LICENSE.amdgpu.gz}
 HAIKU_BUILD=${HAIKU_BUILD:-/mnt/HaikuWork/build/master-x86_64}
 TOOL=$HAIKU_BUILD/objects/linux/x86_64/release/tools/package/package
 export LD_LIBRARY_PATH=$HAIKU_BUILD/objects/linux/lib
-BIN=$ROOT/out-release/amdgpu_drm
+BIN=${BIN:-$ROOT/out-release/amdgpu_drm}
 
 [ -x "$TOOL" ] || { echo "no package tool in $HAIKU_BUILD" >&2; exit 1; }
 if ! grep -aq amdgpu_drm.starting "$BIN" || grep -aq amdgpu_drm.arm "$BIN"; then
