@@ -5,11 +5,12 @@
 
 /*	The screen's frame buffer through Vulkan (VkImportScanoutMemoryHAIKU, as
 	Summit's zink present asks for it): imports it on the first AMD GPU,
-	prints its shape, copies its first rows into host memory with the GPU
-	and prints a few pixels, then imports and frees it again and again to
-	time that and to catch leaks. Nothing is written to the screen.
+	prints its shape, copies its first rows (or the rows from y, to see what
+	a renderer presented there) into host memory with the GPU and prints a
+	few pixels, then imports and frees it again and again to time that and
+	to catch leaks. Nothing is written to the screen.
 
-	vkscanout [imports]		default 100
+	vkscanout [imports [x y]]		default 100, 0 0
 
 	Loads the Vulkan loader at run time, so it needs no Vulkan library to
 	link; cross-built with the air/OS SDK and Mesa's include/vulkan. */
@@ -93,6 +94,8 @@ int
 main(int argc, char** argv)
 {
 	int imports = argc > 1 ? atoi(argv[1]) : 100;
+	uint32_t x = argc > 3 ? (uint32_t)atoi(argv[2]) : 0;
+	uint32_t y = argc > 3 ? (uint32_t)atoi(argv[3]) : 0;
 	void* loader = dlopen("libvulkan.so.1", RTLD_NOW);
 	if (loader == NULL) {
 		fprintf(stderr, "no Vulkan loader: %s\n", dlerror());
@@ -183,8 +186,12 @@ main(int argc, char** argv)
 		failures++;
 	}
 
-	// the first rows, copied by the GPU into host memory
+	// the first rows (or those from y), copied by the GPU into host memory
 	const uint32_t rows = 8;
+	if (x + 4 > scanout.width || y + rows > scanout.height) {
+		printf("FAIL: %u,%u is outside the frame buffer\n", x, y);
+		return 1;
+	}
 	VkDeviceSize bytes = (VkDeviceSize)scanout.rowPitch * rows;
 	VkBufferCreateInfo bufferInfo = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -230,7 +237,7 @@ main(int argc, char** argv)
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 	};
 	vkBeginCommandBuffer(commands, &begin);
-	VkBufferCopy region = { 0, 0, bytes };
+	VkBufferCopy region = { (VkDeviceSize)scanout.rowPitch * y, 0, bytes };
 	vkCmdCopyBuffer(commands, source, target, 1, &region);
 	vkEndCommandBuffer(commands);
 	VkSubmitInfo submit = {
@@ -248,9 +255,9 @@ main(int argc, char** argv)
 	uint32_t nonzero = 0;
 	for (uint32_t i = 0; i < bytes / 4; i++)
 		nonzero += pixels[i] != 0;
-	printf("first %u rows: %u of %llu pixels not zero; at 0,0: %08x %08x %08x "
-		"%08x\n", rows, nonzero, (unsigned long long)(bytes / 4), pixels[0],
-		pixels[1], pixels[2], pixels[3]);
+	printf("%u rows from %u: %u of %llu pixels not zero; at %u,%u: %08x %08x "
+		"%08x %08x\n", rows, y, nonzero, (unsigned long long)(bytes / 4), x, y,
+		pixels[x], pixels[x + 1], pixels[x + 2], pixels[x + 3]);
 	if (nonzero == 0) {
 		printf("FAIL: the rows read back empty (not the screen?)\n");
 		failures++;
