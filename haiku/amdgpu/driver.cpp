@@ -164,6 +164,9 @@ struct drm_haiku_crc {
 };
 static const uint32 kDrmHaikuCrc = LX_IOC(3, 'd', 0xf7,
 	sizeof(drm_haiku_crc));
+// the screen's frame buffer: lx_glue_scanout_args (glue.h) is its layout
+static const uint32 kDrmHaikuScanout = LX_IOC(3, 'd', 0xf8,
+	sizeof(lx_glue_scanout_args));
 
 
 int32 api_version = B_CUR_DRIVER_API_VERSION;
@@ -848,6 +851,21 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 			return B_BAD_ADDRESS;
 		int error = lx_glue_crc(cookie->file, request.crtc_index,
 			request.op, request.crc, &request.frame, request.window);
+		if (error != 0)
+			return haiku_status(error);
+		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		return B_OK;
+	}
+
+	if (op == kDrmHaikuScanout) {
+		// publishing is the display (primary) node's, getting anyone's;
+		// glue.c checks
+		lx_glue_scanout_args request;
+		if (!IS_USER_ADDRESS(buffer)
+			|| user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+			return B_BAD_ADDRESS;
+		int error = lx_glue_scanout(cookie->file, &request);
 		if (error != 0)
 			return haiku_status(error);
 		if (user_memcpy(buffer, &request, sizeof(request)) != B_OK)
