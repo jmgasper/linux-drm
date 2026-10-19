@@ -35,6 +35,74 @@ struct kthread {
 static struct pid lx_kernel_pid = { .count = REFCOUNT_INIT(1), .nr = 0 };
 
 
+/* #pragma mark - teams' mms */
+
+static LIST_HEAD(lx_team_mms);
+static DEFINE_SPINLOCK(lx_team_mms_lock);
+
+
+static struct mm_struct *
+lx_team_mm_find(int team)
+{
+	struct mm_struct *mm;
+	list_for_each_entry(mm, &lx_team_mms, lx_link) {
+		if (mm->lx_team == team && atomic_inc_not_zero(&mm->mm_count))
+			return mm;
+	}
+	return NULL;
+}
+
+
+/* the team's mm, with a reference */
+static struct mm_struct *
+lx_team_mm_get(int team)
+{
+	struct mm_struct *mm, *other;
+
+	spin_lock(&lx_team_mms_lock);
+	mm = lx_team_mm_find(team);
+	spin_unlock(&lx_team_mms_lock);
+	if (mm != NULL)
+		return mm;
+
+	mm = kzalloc(sizeof(*mm), GFP_KERNEL);
+	if (mm == NULL)
+		return NULL;
+	init_rwsem(&mm->mmap_lock);
+	atomic_set(&mm->mm_users, 1);
+	atomic_set(&mm->mm_count, 1);
+	mm->lx_team = team;
+	spin_lock(&lx_team_mms_lock);
+	other = lx_team_mm_find(team);
+	if (other == NULL)
+		list_add(&mm->lx_link, &lx_team_mms);
+	spin_unlock(&lx_team_mms_lock);
+	if (other != NULL) {
+		kfree(mm);
+		return other;
+	}
+	return mm;
+}
+
+
+void
+mmdrop(struct mm_struct *mm)
+{
+	bool last;
+
+	spin_lock(&lx_team_mms_lock);
+	last = atomic_dec_and_test(&mm->mm_count);
+	if (last)
+		list_del(&mm->lx_link);
+	spin_unlock(&lx_team_mms_lock);
+	if (last)
+		kfree(mm);
+}
+
+
+/* #pragma mark - tasks */
+
+
 static void
 lx_task_free(void *_task)
 {
@@ -42,6 +110,8 @@ lx_task_free(void *_task)
 	struct lx_task_private *priv = task->lx_private;
 	if (task->lx_kthread != NULL)
 		return;		/* kthread_stop() frees it */
+	if (task->mm != NULL)
+		mmdrop(task->mm);
 	if (priv != NULL) {
 		lx_haiku_event_delete(priv->event);
 		kfree(priv);
@@ -79,6 +149,9 @@ lx_task_create(lx_thread_id thread, bool kernel_thread)
 			pid->nr = task->tgid;
 		}
 		task->thread_pid = pid != NULL ? pid : &lx_kernel_pid;
+		/* Haiku's own kernel threads have no mm, as Linux kernel threads */
+		if (task->tgid != LX_HAIKU_KERNEL_TEAM)
+			task->mm = lx_team_mm_get(task->tgid);
 	}
 	lx_haiku_thread_name(thread, task->comm, sizeof(task->comm));
 	if (!kernel_thread)

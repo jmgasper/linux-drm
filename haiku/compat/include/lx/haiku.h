@@ -82,6 +82,7 @@ int lx_haiku_selftest_task_exit(void *(*get_current)(void));
 int lx_haiku_mutex_lock_timeout(void *mutex, long long timeout_us);
 
 /* threads */
+#define LX_HAIKU_KERNEL_TEAM	1	/* B_SYSTEM_TEAM */
 lx_thread_id lx_haiku_current_thread(void);
 lx_thread_id lx_haiku_current_team(void);
 void lx_haiku_team_name(lx_thread_id team, char *buffer, unsigned long size);
