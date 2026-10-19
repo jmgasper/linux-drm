@@ -143,6 +143,18 @@ unsigned long long lx_haiku_virt_to_phys(const void *address);
 int lx_haiku_user_memcpy(void *to, const void *from, unsigned long size);
 long lx_haiku_user_strlcpy(char *to, const char *from, unsigned long size);
 int lx_haiku_is_user_address(const void *address, unsigned long size);
+/* "count" pages of the calling team wired for a device (only RAM; no
+   mapped files if anon_only), their addresses in physical[]; a Linux error */
+int lx_haiku_user_pages_lock(unsigned long address, unsigned long count,
+	int writable, int anon_only, lx_thread_id *team,
+	unsigned long long *physical);
+void lx_haiku_user_pages_unlock(lx_thread_id team, unsigned long address,
+	unsigned long count, int writable);
+/* the hook runs as the team is deleted, before its address space goes */
+int lx_haiku_team_watch(lx_thread_id team, void (*hook)(lx_thread_id, void *),
+	void *data);
+int lx_haiku_team_unwatch(lx_thread_id team,	/* 0: removed before it ran */
+	void (*hook)(lx_thread_id, void *), void *data);
 
 /* files: the whole file in a new malloc() block */
 int lx_haiku_read_file(const char *path, void **data, unsigned long *size);

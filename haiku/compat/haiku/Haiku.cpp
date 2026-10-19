@@ -35,6 +35,8 @@
 #include <vm/vm.h>
 #include <vm/vm_page.h>
 #include <vm/VMAddressSpace.h>
+#include <vm/VMArea.h>
+#include <vm/VMCache.h>
 #include <arch/x86/arch_cpu.h>
 #include <arch/debug.h>
 
@@ -51,6 +53,8 @@ static const int kLinuxENOENT = 2;
 static const int kLinuxEIO = 5;
 static const int kLinuxETIMEDOUT = 110;
 static const int kLinuxEINTR = 4;
+static const int kLinuxEPERM = 1;
+static const int kLinuxESRCH = 3;
 
 
 // #pragma mark - output, time, processors
@@ -1287,6 +1291,147 @@ extern "C" int
 lx_haiku_is_user_address(const void* address, unsigned long size)
 {
 	return is_user_address_range(address, size);
+}
+
+
+/*	Whether [address, address + size) of the address space (read locked) is
+	all in areas of RAM: anonymous memory (also cloned or copied on write)
+	and, unless anonOnly, mapped files. Never device memory, which a device
+	must not be told is RAM. */
+static int
+check_user_ram(VMAddressSpace* addressSpace, addr_t address, size_t size,
+	bool anonOnly)
+{
+	addr_t end = address + size;
+	while (address < end) {
+		VMArea* area = addressSpace->LookupArea(address);
+		if (area == NULL)
+			return -kLinuxEFAULT;
+
+		int error = 0;
+		VMCache* top = vm_area_get_locked_cache(area);
+		VMCache* cache = top;
+		while (true) {
+			if (cache->type == CACHE_TYPE_VNODE ? anonOnly
+					: cache->type != CACHE_TYPE_RAM) {
+				error = cache->type == CACHE_TYPE_VNODE
+					? -kLinuxEPERM : -kLinuxEFAULT;
+				break;
+			}
+			VMCache* source = cache->source;
+			if (source == NULL)
+				break;
+			source->Lock();
+			source->AcquireRefLocked();
+			if (cache != top)
+				cache->ReleaseRefAndUnlock();
+			cache = source;
+		}
+		if (cache != top)
+			cache->ReleaseRefAndUnlock();
+		vm_area_put_locked_cache(top);
+		if (error != 0)
+			return error;
+
+		address = area->Base() + area->Size();
+	}
+	return 0;
+}
+
+
+/*	Wires \a count pages of the calling team from \a address for a device,
+	as nvidia_rm's os_lock_user_pages() does, writable if the device writes
+	into them, and fills \a physical with their addresses. Haiku moves no
+	wired page, so they stay where they are until
+	lx_haiku_user_pages_unlock(). That must come before the team's address
+	space goes away: a team's areas cannot be deleted while wired. */
+extern "C" int
+lx_haiku_user_pages_lock(unsigned long address, unsigned long count,
+	int writable, int anonOnly, lx_thread_id* _team,
+	unsigned long long* physical)
+{
+	size_t size = count * B_PAGE_SIZE;
+	if (count == 0 || size / B_PAGE_SIZE != count
+		|| address % B_PAGE_SIZE != 0
+		|| !is_user_address_range((void*)address, size))
+		return -kLinuxEFAULT;
+
+	team_id team = team_get_current_team_id();
+	VMAddressSpace* addressSpace = VMAddressSpace::Get(team);
+	if (addressSpace == NULL)
+		return -kLinuxESRCH;
+	addressSpace->ReadLock();
+	int error = check_user_ram(addressSpace, address, size, anonOnly != 0);
+	addressSpace->ReadUnlock();
+	addressSpace->Put();
+	if (error != 0)
+		return error;
+
+	uint32 flags = writable ? B_READ_DEVICE : 0;
+	status_t status = lock_memory_etc(team, (void*)address, size, flags);
+	if (status != B_OK)
+		return status == B_NO_MEMORY ? -kLinuxENOMEM : -kLinuxEFAULT;
+
+	unsigned long done = 0;
+	while (done < count) {
+		physical_entry table[64];
+		uint32 entries = B_COUNT_OF(table);
+		status = get_memory_map_etc(team,
+			(void*)(address + done * B_PAGE_SIZE),
+			(count - done) * B_PAGE_SIZE, table, &entries);
+		if (status != B_OK && status != B_BUFFER_OVERFLOW)
+			break;
+		for (uint32 i = 0; i < entries; i++) {
+			for (phys_size_t offset = 0;
+					offset < table[i].size && done < count;
+					offset += B_PAGE_SIZE)
+				physical[done++] = table[i].address + offset;
+		}
+		if (status == B_OK)
+			break;
+	}
+	if (done != count) {
+		unlock_memory_etc(team, (void*)address, size, flags);
+		return -kLinuxEFAULT;
+	}
+
+	*_team = team;
+	return 0;
+}
+
+
+extern "C" void
+lx_haiku_user_pages_unlock(lx_thread_id team, unsigned long address,
+	unsigned long count, int writable)
+{
+	status_t status = unlock_memory_etc(team, (void*)address,
+		count * B_PAGE_SIZE, writable ? B_READ_DEVICE : 0);
+	if (status != B_OK) {
+		panic("linux compat: cannot unwire %lu pages at %#lx of team %"
+			B_PRId32 ": %s", count, address, team, strerror(status));
+	}
+}
+
+
+/*	\a hook runs when the team goes away: at the start of its deletion, while
+	its address space still exists (and with the team locked). */
+extern "C" int
+lx_haiku_team_watch(lx_thread_id team, void (*hook)(lx_thread_id, void*),
+	void* data)
+{
+	status_t status = start_watching_team(team, hook, data);
+	if (status == B_OK)
+		return 0;
+	return status == B_NO_MEMORY ? -kLinuxENOMEM : -kLinuxESRCH;
+}
+
+
+/* 0 if the hook was removed before it ran */
+extern "C" int
+lx_haiku_team_unwatch(lx_thread_id team, void (*hook)(lx_thread_id, void*),
+	void* data)
+{
+	return stop_watching_team(team, hook, data) == B_OK ? 0 : -kLinuxENOENT;
 }
 
 

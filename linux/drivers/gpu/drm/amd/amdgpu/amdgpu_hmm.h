@@ -21,6 +21,11 @@
  *
  * Authors: Christian König
  */
+/*
+ * Changed for air/OS (Haiku), 2026: userptr buffers wire their pages instead
+ * of following them with an MMU notifier (haiku/amdgpu/userptr.c). The
+ * changes are in the history of https://github.com/jmgasper/linux-drm
+ */
 #ifndef __AMDGPU_MN_H__
 #define __AMDGPU_MN_H__
 
@@ -37,7 +42,7 @@ int amdgpu_hmm_range_get_pages(struct mmu_interval_notifier *notifier,
 			       struct hmm_range **phmm_range);
 bool amdgpu_hmm_range_get_pages_done(struct hmm_range *hmm_range);
 
-#if defined(CONFIG_HMM_MIRROR)
+#if defined(CONFIG_HMM_MIRROR) || defined(__HAIKU_LINUX_COMPAT__)
 int amdgpu_hmm_register(struct amdgpu_bo *bo, unsigned long addr);
 void amdgpu_hmm_unregister(struct amdgpu_bo *bo);
 #else
@@ -48,6 +53,20 @@ static inline int amdgpu_hmm_register(struct amdgpu_bo *bo, unsigned long addr)
 	return -ENODEV;
 }
 static inline void amdgpu_hmm_unregister(struct amdgpu_bo *bo) {}
+#endif
+
+#ifdef __HAIKU_LINUX_COMPAT__
+/* the wired pages of a userptr buffer (haiku/amdgpu/userptr.c) */
+struct drm_gem_object;
+struct lx_userptr;
+int lx_userptr_create(struct drm_gem_object *gobj, unsigned long address,
+		      unsigned long count, bool writable, bool anon_only,
+		      struct lx_userptr **userptr);
+void lx_userptr_detach(struct lx_userptr *userptr);
+void lx_userptr_release(struct lx_userptr *userptr);
+int lx_userptr_get_pages(struct lx_userptr *userptr,
+			 struct hmm_range **range);
+bool lx_userptr_get_pages_done(struct hmm_range *range);
 #endif
 
 #endif

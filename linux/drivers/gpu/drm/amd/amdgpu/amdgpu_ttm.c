@@ -24,6 +24,12 @@
  *
  */
 /*
+ * Changed for air/OS (Haiku), 2026: userptr buffers on Haiku, whose pages are
+ * wired for the buffer's life (haiku/amdgpu/userptr.c) instead of followed by
+ * an MMU notifier, and which belong to a team's mm. The changes are in the
+ * history of https://github.com/jmgasper/linux-drm
+ */
+/*
  * Authors:
  *    Jerome Glisse <glisse@freedesktop.org>
  *    Thomas Hellstrom <thomas-at-tungstengraphics-dot-com>
@@ -717,6 +723,11 @@ struct amdgpu_ttm_tt {
 	uint32_t		userflags;
 	bool			bound;
 	int32_t			pool_id;
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* a task is one thread on Haiku: the buffer belongs to its team's mm */
+	struct mm_struct	*usermm;
+	struct lx_userptr	*lx_userptr;	/* the wired user pages */
+#endif
 };
 
 #define ttm_to_amdgpu_ttm_tt(ptr)	container_of(ptr, struct amdgpu_ttm_tt, ttm)
@@ -808,6 +819,64 @@ bool amdgpu_ttm_tt_get_user_pages_done(struct ttm_tt *ttm,
 	WARN_ONCE(!range->hmm_pfns, "No user pages to check\n");
 
 	return !amdgpu_hmm_range_get_pages_done(range);
+}
+#elif defined(__HAIKU_LINUX_COMPAT__)
+/*
+ * Haiku: the pages were wired when the buffer was made and stay wired, so
+ * they are always the same and only become invalid when the team dies.
+ */
+int amdgpu_ttm_tt_get_user_pages(struct amdgpu_bo *bo,
+				 struct hmm_range **range)
+{
+	struct amdgpu_ttm_tt *gtt = ttm_to_amdgpu_ttm_tt(bo->tbo.ttm);
+
+	*range = NULL;
+	if (unlikely(!gtt->lx_userptr)) {
+		DRM_DEBUG_DRIVER("BO is not registered?\n");
+		return -EFAULT;
+	}
+	return lx_userptr_get_pages(gtt->lx_userptr, range);
+}
+
+void amdgpu_ttm_tt_discard_user_pages(struct ttm_tt *ttm,
+				      struct hmm_range *range)
+{
+	if (range)
+		lx_userptr_get_pages_done(range);
+}
+
+bool amdgpu_ttm_tt_get_user_pages_done(struct ttm_tt *ttm,
+				       struct hmm_range *range)
+{
+	struct amdgpu_ttm_tt *gtt = ttm_to_amdgpu_ttm_tt(ttm);
+
+	if (!gtt || !gtt->userptr || !range)
+		return false;
+
+	return lx_userptr_get_pages_done(range);
+}
+
+int amdgpu_hmm_register(struct amdgpu_bo *bo, unsigned long addr)
+{
+	struct amdgpu_ttm_tt *gtt = ttm_to_amdgpu_ttm_tt(bo->tbo.ttm);
+
+	if (gtt->lx_userptr)
+		return -EBUSY;
+	return lx_userptr_create(&bo->tbo.base, addr, bo->tbo.ttm->num_pages,
+				 !amdgpu_ttm_tt_is_readonly(bo->tbo.ttm),
+				 gtt->userflags & AMDGPU_GEM_USERPTR_ANONONLY,
+				 &gtt->lx_userptr);
+}
+
+void amdgpu_hmm_unregister(struct amdgpu_bo *bo)
+{
+	struct amdgpu_ttm_tt *gtt;
+
+	if (!bo->tbo.ttm)
+		return;
+	gtt = ttm_to_amdgpu_ttm_tt(bo->tbo.ttm);
+	if (gtt->lx_userptr)
+		lx_userptr_detach(gtt->lx_userptr);
 }
 #endif
 
@@ -1119,6 +1188,13 @@ static void amdgpu_ttm_backend_destroy(struct ttm_device *bdev,
 {
 	struct amdgpu_ttm_tt *gtt = ttm_to_amdgpu_ttm_tt(ttm);
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	/* TTM destroys the pages once the GPU is done with them */
+	if (gtt->lx_userptr)
+		lx_userptr_release(gtt->lx_userptr);
+	if (gtt->usermm)
+		mmdrop(gtt->usermm);
+#endif
 	if (gtt->usertask)
 		put_task_struct(gtt->usertask);
 
@@ -1296,10 +1372,18 @@ int amdgpu_ttm_tt_set_userptr(struct ttm_buffer_object *bo,
 	gtt->userptr = addr;
 	gtt->userflags = flags;
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	if (gtt->usermm)
+		mmdrop(gtt->usermm);
+	gtt->usermm = current->mm;
+	if (gtt->usermm)
+		mmgrab(gtt->usermm);
+#else
 	if (gtt->usertask)
 		put_task_struct(gtt->usertask);
 	gtt->usertask = current->group_leader;
 	get_task_struct(gtt->usertask);
+#endif
 
 	return 0;
 }
@@ -1314,10 +1398,14 @@ struct mm_struct *amdgpu_ttm_tt_get_usermm(struct ttm_tt *ttm)
 	if (gtt == NULL)
 		return NULL;
 
+#ifdef __HAIKU_LINUX_COMPAT__
+	return gtt->usermm;
+#else
 	if (gtt->usertask == NULL)
 		return NULL;
 
 	return gtt->usertask->mm;
+#endif
 }
 
 /*
