@@ -198,6 +198,8 @@ gpu_submit(struct gpu* gpu, uint32_t userptr)
 	memset(&ibChunk, 0, sizeof(ibChunk));
 	ibChunk.ip_type = AMDGPU_HW_IP_GFX;
 	ibChunk.va_start = IB_VA;
+	ibChunk.flags = AMDGPU_IB_FLAG_EMIT_MEM_SYNC;
+		// the IB is rewritten in place: the GPU's caches may hold the last one
 	ibChunk.ib_bytes = gpu->ibDwords * 4;
 	struct drm_amdgpu_bo_list_in listIn;
 	memset(&listIn, 0, sizeof(listIn));
@@ -292,9 +294,13 @@ test_clone(struct gpu* gpu)
 	memset(original, 0, SIZE);
 	gpu_build_writes(gpu, 0xdef00000, 1);
 	seq = gpu_submit(gpu, handle);
-	CHECK(seq != 0 && gpu_wait(gpu, seq) == 0
-		&& *(uint32_t*)((char*)original + 7 * B_PAGE_SIZE) == 0xdef00007,
-		"a second submission writes the same pages");
+	int submitError = seq == 0 ? errno : 0;
+	int waited = seq != 0 ? gpu_wait(gpu, seq) : -1;
+	uint32_t word = *(uint32_t*)((char*)original + 7 * B_PAGE_SIZE);
+	CHECK(seq != 0 && waited == 0 && word == 0xdef00007,
+		"a second submission writes the same pages (CS %s, wait %d, "
+		"page 7: %08x)", seq != 0 ? "ok" : strerror(submitError), waited,
+		word);
 	close_handle(gpu->fd, handle);
 
 out:
