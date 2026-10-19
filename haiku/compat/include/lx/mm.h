@@ -544,12 +544,17 @@ typedef unsigned long vm_flags_t;
 #define VM_WIPEONFORK	0x02000000
 #define VM_ACCESS_FLAGS	(VM_READ | VM_WRITE | VM_EXEC)
 
+/*	One per team, current->mm of the team's threads (kernel threads have
+	none): amdgpu's userptr buffers belong to the team that made them and are
+	checked against current->mm. Tasks and mmgrab() hold mm_count; the last
+	mmdrop() frees it (compat/src/sched.c). */
 struct mm_struct {
 	struct rw_semaphore mmap_lock;
 	atomic_t mm_users;
 	atomic_t mm_count;
 	unsigned long total_vm;
 	int lx_team;
+	struct list_head lx_link;	/* in the table of teams' mms */
 };
 
 struct vm_area_struct;
@@ -647,7 +652,7 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 #define mmput(mm)				atomic_dec(&(mm)->mm_users)
 #define mmput_async(mm)			mmput(mm)
 #define mmgrab(mm)				atomic_inc(&(mm)->mm_count)
-#define mmdrop(mm)				atomic_dec(&(mm)->mm_count)
+void mmdrop(struct mm_struct *mm);
 #define find_vma(mm, addr)		((struct vm_area_struct *)NULL)
 #define vma_lookup(mm, addr)	((struct vm_area_struct *)NULL)
 #define get_task_mm(task)		((task)->mm)

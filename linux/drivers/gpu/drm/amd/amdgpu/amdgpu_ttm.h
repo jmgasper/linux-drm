@@ -20,6 +20,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  */
+/*
+ * Changed for air/OS (Haiku), 2026: userptr buffers on Haiku (their pages are
+ * wired, haiku/amdgpu/userptr.c). The changes are in the history of
+ * https://github.com/jmgasper/linux-drm
+ */
 
 #ifndef __AMDGPU_TTM_H__
 #define __AMDGPU_TTM_H__
@@ -190,7 +195,7 @@ int amdgpu_ttm_alloc_gart(struct ttm_buffer_object *bo);
 void amdgpu_ttm_recover_gart(struct ttm_buffer_object *tbo);
 uint64_t amdgpu_ttm_domain_start(struct amdgpu_device *adev, uint32_t type);
 
-#if IS_ENABLED(CONFIG_DRM_AMDGPU_USERPTR)
+#if IS_ENABLED(CONFIG_DRM_AMDGPU_USERPTR) || defined(__HAIKU_LINUX_COMPAT__)
 int amdgpu_ttm_tt_get_user_pages(struct amdgpu_bo *bo,
 				 struct hmm_range **range);
 void amdgpu_ttm_tt_discard_user_pages(struct ttm_tt *ttm,

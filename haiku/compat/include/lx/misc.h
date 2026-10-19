@@ -898,13 +898,16 @@ struct dev_pagemap {
 };
 #define devm_memremap_pages(dev, pgmap)	ERR_PTR(-ENODEV)
 #define devm_memunmap_pages(dev, pgmap)	do { } while (0)
+/*	amdgpu's userptr pages (haiku/amdgpu/userptr.c): the range describes
+	pages that stay wired for the buffer's life, and its "pfns" are their
+	struct pages. */
 struct hmm_range {
 	unsigned long start;
 	unsigned long end;
 	unsigned long *hmm_pfns;
 	void *dev_private_owner;
 };
-#define hmm_pfn_to_page(pfn)	((struct page *)NULL)
+#define hmm_pfn_to_page(pfn)	((struct page *)(pfn))
 
 /* radix trees, on the XArray */
 #define radix_tree_root		xarray

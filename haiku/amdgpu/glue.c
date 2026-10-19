@@ -33,6 +33,7 @@
 
 #include "amdgpu.h"
 #include "amdgpu_dpm.h"
+#include "amdgpu_hmm.h"
 #include "amdgpu_object.h"
 #include "dc.h"
 
@@ -1927,9 +1928,192 @@ fake_move_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 }
 
 
+/*	"userptr": a buffer of the calling team's own pages, wired as amdgpu's
+	userptr buffers are (userptr.c), to try their life in a virtual machine
+	(tests/fakeuserptr.c). The ioctl writes a pattern into the pages through
+	their physical addresses, as a GPU would, and then, if asked, the device
+	keeps writing the first word of each page for a while behind a fence on
+	the buffer, like GPU work the team submitted before it died. Freeing the
+	buffer lets the pages go only once that fence has signalled, in a work
+	item, as TTM does. */
+
+struct drm_haiku_fake_userptr {
+	__u64 address;
+	__u64 size;
+	__u32 flags;		/* 1: read only, 2: anonymous memory only */
+	__u32 handle;
+	__u32 busy_ms;		/* how long the device keeps writing */
+	__u32 pattern;		/* word i of the buffer becomes pattern + i */
+};
+
+#define DRM_HAIKU_FAKE_USERPTR	0x02
+#define DRM_IOCTL_HAIKU_FAKE_USERPTR	DRM_IOWR(DRM_COMMAND_BASE \
+	+ DRM_HAIKU_FAKE_USERPTR, struct drm_haiku_fake_userptr)
+
+struct fake_userptr {
+	struct drm_gem_object base;
+	struct lx_userptr *userptr;
+	struct page **pages;		/* as the device sees them */
+	unsigned long count;
+	struct dma_fence *fence;	/* until the device is done writing */
+	struct delayed_work busy;
+	unsigned long busy_until;
+	u32 busy_count;
+	struct work_struct release;
+};
+
+static DEFINE_SPINLOCK(fake_fence_lock);
+static u64 fake_fence_context;
+static atomic64_t fake_fence_seqno;
+
+
+static const char *
+fake_fence_name(struct dma_fence *fence)
+{
+	return "haiku_fake";
+}
+
+
+static const struct dma_fence_ops fake_fence_ops = {
+	.get_driver_name = fake_fence_name,
+	.get_timeline_name = fake_fence_name,
+};
+
+
+/* a pass over the pages every millisecond until the time is up */
+static void
+fake_userptr_busy(struct work_struct *work)
+{
+	struct fake_userptr *bo = container_of(to_delayed_work(work),
+		struct fake_userptr, busy);
+	struct dma_fence *fence;
+	unsigned long i;
+
+	bo->busy_count++;
+	for (i = 0; i < bo->count; i++)
+		WRITE_ONCE(*(u32 *)page_address(bo->pages[i]), bo->busy_count);
+	if (time_before(jiffies, bo->busy_until)) {
+		queue_delayed_work(system_unbound_wq, &bo->busy, msecs_to_jiffies(1));
+		return;
+	}
+	fence = bo->fence;
+	bo->fence = NULL;
+	dma_fence_signal(fence);
+	dma_fence_put(fence);
+}
+
+
+static void
+fake_userptr_release(struct work_struct *work)
+{
+	struct fake_userptr *bo = container_of(work, struct fake_userptr, release);
+
+	dma_resv_wait_timeout(bo->base.resv, DMA_RESV_USAGE_BOOKKEEP, false,
+		MAX_SCHEDULE_TIMEOUT);
+	cancel_delayed_work_sync(&bo->busy);
+	lx_userptr_release(bo->userptr);
+	drm_gem_object_release(&bo->base);
+	kvfree(bo->pages);
+	kfree(bo);
+}
+
+
+static void
+fake_userptr_free(struct drm_gem_object *obj)
+{
+	struct fake_userptr *bo = container_of(obj, struct fake_userptr, base);
+
+	lx_userptr_detach(bo->userptr);
+	INIT_WORK(&bo->release, fake_userptr_release);
+	queue_work(system_unbound_wq, &bo->release);
+}
+
+
+static const struct drm_gem_object_funcs fake_userptr_funcs = {
+	.free = fake_userptr_free,
+};
+
+
+static int
+fake_userptr_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct drm_haiku_fake_userptr *args = data;
+	bool read_only = (args->flags & 1) != 0;
+	struct fake_userptr *bo;
+	struct hmm_range *range;
+	unsigned long i, j;
+	int error;
+
+	if (args->size == 0 || args->size > (256 << 20)
+		|| offset_in_page(args->address | args->size) || (args->flags & ~3)
+		|| (read_only && args->busy_ms != 0))
+		return -EINVAL;
+	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	if (bo == NULL)
+		return -ENOMEM;
+	bo->count = args->size >> PAGE_SHIFT;
+	bo->pages = kvmalloc_array(bo->count, sizeof(*bo->pages), GFP_KERNEL);
+	if (bo->pages == NULL) {
+		kfree(bo);
+		return -ENOMEM;
+	}
+	bo->base.funcs = &fake_userptr_funcs;
+	drm_gem_private_object_init(dev, &bo->base, args->size);
+	INIT_DELAYED_WORK(&bo->busy, fake_userptr_busy);
+	error = lx_userptr_create(&bo->base, args->address, bo->count, !read_only,
+		(args->flags & 2) != 0, &bo->userptr);
+	if (error != 0) {
+		drm_gem_object_release(&bo->base);
+		kvfree(bo->pages);
+		kfree(bo);
+		return error;
+	}
+
+	error = lx_userptr_get_pages(bo->userptr, &range);
+	if (error == 0) {
+		for (i = 0; i < bo->count; i++)
+			bo->pages[i] = hmm_pfn_to_page(range->hmm_pfns[i]);
+		lx_userptr_get_pages_done(range);
+	}
+	for (i = 0; error == 0 && !read_only && i < bo->count; i++) {
+		u32 *words = page_address(bo->pages[i]);
+		for (j = 0; j < PAGE_SIZE / 4; j++)
+			words[j] = args->pattern + i * (PAGE_SIZE / 4) + j;
+	}
+	if (error == 0 && args->busy_ms != 0) {
+		bo->fence = kzalloc(sizeof(*bo->fence), GFP_KERNEL);
+		if (bo->fence == NULL)
+			error = -ENOMEM;
+	}
+	if (error == 0 && args->busy_ms != 0) {
+		dma_fence_init(bo->fence, &fake_fence_ops, &fake_fence_lock,
+			fake_fence_context, atomic64_inc_return(&fake_fence_seqno));
+		dma_resv_lock(bo->base.resv, NULL);
+		error = dma_resv_reserve_fences(bo->base.resv, 1);
+		if (error == 0) {
+			dma_resv_add_fence(bo->base.resv, bo->fence,
+				DMA_RESV_USAGE_WRITE);
+			bo->busy_until = jiffies + msecs_to_jiffies(args->busy_ms);
+			queue_delayed_work(system_unbound_wq, &bo->busy, 0);
+		} else {
+			dma_fence_signal(bo->fence);
+			dma_fence_put(bo->fence);
+			bo->fence = NULL;
+		}
+		dma_resv_unlock(bo->base.resv);
+	}
+	if (error == 0)
+		error = drm_gem_handle_create(file, &bo->base, &args->handle);
+	drm_gem_object_put(&bo->base);
+	return error;
+}
+
+
 static const struct drm_ioctl_desc fake_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(HAIKU_FAKE_CREATE, fake_create_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(HAIKU_FAKE_MOVE, fake_move_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(HAIKU_FAKE_USERPTR, fake_userptr_ioctl,
+		DRM_RENDER_ALLOW),
 };
 
 
@@ -1963,6 +2147,7 @@ int
 lx_glue_fake_device_start(void)
 {
 	int error;
+	fake_fence_context = dma_fence_context_alloc(1);
 	device_initialize(&fake_parent);
 	dev_set_name(&fake_parent, "haiku-fake");
 	fake_drm = drm_dev_alloc(&fake_driver, &fake_parent);
