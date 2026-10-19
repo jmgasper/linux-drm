@@ -20,6 +20,11 @@
 	a buffer is not covered: exec_team() deletes the areas before it closes
 	any file.
 
+	Unlike on Linux, the memory has to stay mapped until the buffer is
+	freed: delete_area() or munmap() of it waits until then, and can
+	neither be interrupted nor killed, so a program that frees the memory
+	before the buffer (Vulkan does not allow it either) hangs.
+
 	The pages get a struct page each, kept here (not in the frame table:
 	they are not the driver's); a range's "pfns" are pointers to them
 	(hmm_pfn_to_page()), in one array every range shares, since they never
