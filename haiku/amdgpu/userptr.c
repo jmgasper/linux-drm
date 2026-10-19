@@ -22,7 +22,8 @@
 
 	The pages get a struct page each, kept here (not in the frame table:
 	they are not the driver's); a range's "pfns" are pointers to them
-	(hmm_pfn_to_page()). */
+	(hmm_pfn_to_page()), in one array every range shares, since they never
+	change: each command submission with the buffer asks for them. */
 
 #include <lx/haiku.h>
 #include <linux/dma-resv.h>
@@ -44,6 +45,7 @@ struct lx_userptr {
 	bool writable;
 	bool wired;
 	bool team_gone;
+	unsigned long *pfns;	/* the ranges' */
 	struct page pages[];
 };
 
@@ -54,6 +56,7 @@ userptr_free(struct kref *ref)
 	struct lx_userptr *userptr = container_of(ref, struct lx_userptr, ref);
 	WARN_ON(userptr->wired);
 	mutex_destroy(&userptr->lock);
+	kvfree(userptr->pfns);
 	kvfree(userptr);
 }
 
@@ -121,7 +124,12 @@ lx_userptr_create(struct drm_gem_object *gobj, unsigned long address,
 
 	userptr = kvzalloc(struct_size(userptr, pages, count), GFP_KERNEL);
 	physical = kvmalloc_array(count, sizeof(*physical), GFP_KERNEL);
-	if (userptr == NULL || physical == NULL) {
+	if (userptr != NULL)
+		userptr->pfns = kvmalloc_array(count, sizeof(*userptr->pfns),
+			GFP_KERNEL);
+	if (userptr == NULL || userptr->pfns == NULL || physical == NULL) {
+		if (userptr != NULL)
+			kvfree(userptr->pfns);
 		kvfree(userptr);
 		kvfree(physical);
 		return -ENOMEM;
@@ -144,6 +152,7 @@ lx_userptr_create(struct drm_gem_object *gobj, unsigned long address,
 			page->lx_head = page;
 			atomic_set(&page->_refcount, 1);
 			INIT_LIST_HEAD(&page->lru);
+			userptr->pfns[i] = (unsigned long)page;
 		}
 		kref_get(&userptr->ref);
 		error = lx_haiku_team_watch(userptr->team, userptr_team_gone, userptr);
@@ -189,21 +198,13 @@ int
 lx_userptr_get_pages(struct lx_userptr *userptr, struct hmm_range **_range)
 {
 	struct hmm_range *range;
-	unsigned long i;
 
 	if (READ_ONCE(userptr->team_gone))
 		return -ESRCH;
 	range = kzalloc(sizeof(*range), GFP_KERNEL);
 	if (range == NULL)
 		return -ENOMEM;
-	range->hmm_pfns = kvmalloc_array(userptr->count, sizeof(*range->hmm_pfns),
-		GFP_KERNEL);
-	if (range->hmm_pfns == NULL) {
-		kfree(range);
-		return -ENOMEM;
-	}
-	for (i = 0; i < userptr->count; i++)
-		range->hmm_pfns[i] = (unsigned long)&userptr->pages[i];
+	range->hmm_pfns = userptr->pfns;
 	range->start = userptr->address;
 	range->end = userptr->address + (userptr->count << PAGE_SHIFT);
 	range->dev_private_owner = userptr;
@@ -219,7 +220,6 @@ lx_userptr_get_pages_done(struct hmm_range *range)
 	struct lx_userptr *userptr = range->dev_private_owner;
 	bool valid = !READ_ONCE(userptr->team_gone);
 
-	kvfree(range->hmm_pfns);
 	kfree(range);
 	return valid;
 }
