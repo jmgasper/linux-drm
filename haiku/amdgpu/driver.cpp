@@ -67,11 +67,16 @@ extern "C" {
 		int32 state);
 	status_t device_manager_add_power_hook(device_manager_power_hook hook,
 		void* cookie, const char* name) __attribute__((weak));
+	status_t device_manager_add_power_hook_etc(device_manager_power_hook hook,
+		void* cookie, const char* name, uint32 flags) __attribute__((weak));
 	status_t device_manager_remove_power_hook(device_manager_power_hook hook,
 		void* cookie) __attribute__((weak));
 }
 __asm__(".type device_manager_add_power_hook, @function\n"
+	".type device_manager_add_power_hook_etc, @function\n"
 	".type device_manager_remove_power_hook, @function");
+// DEVICE_MANAGER_POWER_HOOK_DEEP_SLEEP: the GPU only sleeps in a deep sleep
+static const uint32 kPowerHookDeepSleep = 0x01;
 
 
 #define DRIVER_NAME "amdgpu_drm"
@@ -1587,10 +1592,12 @@ init_driver(void)
 		sShutdownHookRegistered = true;
 	}
 	sSleepCondition.Init(&sSleepCondition, "amdgpu_drm sleep");
-	if (device_manager_add_power_hook != NULL
-		&& device_manager_add_power_hook(&power_hook, NULL, DRIVER_NAME)
-			== B_OK) {
-		sPowerHookRegistered = true;
+	if (device_manager_add_power_hook_etc != NULL) {
+		sPowerHookRegistered = device_manager_add_power_hook_etc(&power_hook,
+			NULL, DRIVER_NAME, kPowerHookDeepSleep) == B_OK;
+	} else if (device_manager_add_power_hook != NULL) {
+		sPowerHookRegistered = device_manager_add_power_hook(&power_hook,
+			NULL, DRIVER_NAME) == B_OK;
 	}
 	// after publish_devices(), which follows init_driver()
 	thread_id pin = spawn_kernel_thread(pin_thread, "amdgpu_drm pin",
