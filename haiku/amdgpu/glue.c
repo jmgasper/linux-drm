@@ -382,6 +382,84 @@ lx_glue_shutdown(void)
 }
 
 
+
+/* Suspend to idle ("haiku_s2idle 1", not yet by default): what Linux does
+ * for an APU when the system suspends to idle (amdgpu_pmops_prepare and
+ * _suspend with in_s0ix): the display state is saved and the display turned
+ * off, the buffers in VRAM go to system memory, GFX, SDMA and the PSP stay
+ * where they are (in GFXOFF), the SMU keeps running. The SoC cannot reach
+ * its deepest state (S0i3) with the GPU awake. Discrete GPUs are left alone
+ * (they would need power removed). */
+static int haiku_s2idle;
+module_param(haiku_s2idle, int, 0644);
+
+static bool suspended[MAX_GPUS];
+
+int
+lx_glue_suspend(void)
+{
+	int i, count = 0;
+
+	if (!haiku_s2idle)
+		return 0;
+
+	for (i = 0; i < probed_count; i++) {
+		struct drm_device *dev = pci_get_drvdata(probed[i]);
+		struct amdgpu_device *adev;
+		int r;
+
+		if (dev == NULL)
+			continue;
+		adev = drm_to_adev(dev);
+		if (!(adev->flags & AMD_IS_APU))
+			continue;
+
+		pr_info("amdgpu: suspending %s to idle\n", pci_name(probed[i]));
+		adev->in_s0ix = true;
+		r = amdgpu_device_prepare(dev);
+		if (r == 0) {
+			r = amdgpu_device_suspend(dev, true);
+			if (r != 0)
+				amdgpu_device_resume(dev, true);
+		}
+		if (r != 0) {
+			pr_err("amdgpu: suspending %s failed: %d\n", pci_name(probed[i]),
+				r);
+			adev->in_s0ix = false;
+			amdgpu_device_complete(dev);
+			lx_glue_resume();
+			return r;
+		}
+		suspended[i] = true;
+		count++;
+	}
+	return count;
+}
+
+
+void
+lx_glue_resume(void)
+{
+	int i;
+	for (i = 0; i < probed_count; i++) {
+		struct drm_device *dev = pci_get_drvdata(probed[i]);
+		struct amdgpu_device *adev;
+		int r;
+
+		if (!suspended[i] || dev == NULL)
+			continue;
+		suspended[i] = false;
+		adev = drm_to_adev(dev);
+
+		pr_info("amdgpu: resuming %s\n", pci_name(probed[i]));
+		r = amdgpu_device_resume(dev, true);
+		if (r != 0)
+			pr_err("amdgpu: resuming %s failed: %d\n", pci_name(probed[i]), r);
+		adev->in_s0ix = false;
+		amdgpu_device_complete(dev);
+	}
+}
+
 void lx_glue_fake_device_stop(void);
 
 void
