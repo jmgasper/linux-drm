@@ -235,9 +235,34 @@ raw_log(const char* text)
 }
 
 
+// The kernel's suspend trace (kdevice_manager.h; weak, as only kernels with
+// suspend to idle have it): while the GPU resumes, every line goes there
+// too, so that a hang there leaves its last line behind.
+extern "C" void device_manager_suspend_trace(const char* format, ...)
+	__attribute__((weak));
+__asm__(".type device_manager_suspend_trace, @function");
+static bool sSuspendTrace;
+
+
+extern "C" void
+lx_haiku_suspend_trace(bool enabled)
+{
+	sSuspendTrace = enabled;
+}
+
+
 extern "C" void
 lx_haiku_log(const char* text)
 {
+	if (sSuspendTrace && device_manager_suspend_trace != NULL) {
+		char line[200];
+		strlcpy(line, text, sizeof(line));
+		size_t length = strlen(line);
+		while (length > 0 && line[length - 1] == '\n')
+			line[--length] = '\0';
+		if (length > 0)
+			device_manager_suspend_trace("%s", line);
+	}
 	if (sRawThread >= 0 && are_interrupts_enabled()
 		&& thread_get_current_thread_id() == sRawThread) {
 		raw_log(text);

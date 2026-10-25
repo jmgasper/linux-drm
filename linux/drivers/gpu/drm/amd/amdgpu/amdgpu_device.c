@@ -98,8 +98,12 @@
  * VRAM aperture after each step of the start. */
 void lx_lab_ip_hook(struct amdgpu_device *adev, const char *step);
 #define LX_LAB_IP_HOOK(adev, step)	lx_lab_ip_hook(adev, step)
+/* each step of a resume in the log (and the kernel's suspend trace) */
+#define LX_RESUME_STEP(adev, step) \
+	dev_info((adev)->dev, "resume: %s\n", step)
 #else
 #define LX_LAB_IP_HOOK(adev, step)	do { } while (0)
+#define LX_RESUME_STEP(adev, step)	do { } while (0)
 #endif
 
 MODULE_FIRMWARE("amdgpu/vega10_gpu_info.bin");
@@ -345,6 +349,7 @@ int amdgpu_ip_block_resume(struct amdgpu_ip_block *ip_block)
 	int r;
 
 	if (ip_block->version->funcs->resume) {
+		LX_RESUME_STEP(ip_block->adev, ip_block->version->funcs->name);
 		r = ip_block->version->funcs->resume(ip_block);
 		if (r) {
 			dev_err(ip_block->adev->dev,
@@ -4215,6 +4220,7 @@ static int amdgpu_device_ip_resume(struct amdgpu_device *adev)
 	if (r)
 		return r;
 
+	LX_RESUME_STEP(adev, "firmware");
 	r = amdgpu_device_fw_loading(adev);
 	if (r)
 		return r;
@@ -5428,11 +5434,15 @@ int amdgpu_device_resume(struct drm_device *dev, bool notify_clients)
 	if (dev->switch_power_state == DRM_SWITCH_POWER_OFF)
 		return 0;
 
-	if (adev->in_s0ix)
+	if (adev->in_s0ix) {
+		LX_RESUME_STEP(adev, "D0 entry");
 		amdgpu_dpm_gfx_state_change(adev, sGpuChangeState_D0Entry);
+	}
 
 	/* post card */
+	LX_RESUME_STEP(adev, "need post?");
 	if (amdgpu_device_need_post(adev)) {
+		LX_RESUME_STEP(adev, "asic init");
 		r = amdgpu_device_asic_init(adev);
 		if (r)
 			dev_err(adev->dev, "amdgpu asic init failed\n");
@@ -5445,6 +5455,7 @@ int amdgpu_device_resume(struct drm_device *dev, bool notify_clients)
 		goto exit;
 	}
 
+	LX_RESUME_STEP(adev, "kfd");
 	r = amdgpu_amdkfd_resume(adev, !amdgpu_sriov_vf(adev) && !adev->in_runpm);
 	if (r)
 		goto exit;
@@ -5453,6 +5464,7 @@ int amdgpu_device_resume(struct drm_device *dev, bool notify_clients)
 	if (r)
 		goto exit;
 
+	LX_RESUME_STEP(adev, "late init");
 	r = amdgpu_device_ip_late_init(adev);
 	if (r)
 		goto exit;
@@ -5472,7 +5484,9 @@ exit:
 		return r;
 
 	/* Make sure IB tests flushed */
+	LX_RESUME_STEP(adev, "IB tests");
 	flush_delayed_work(&adev->delayed_init_work);
+	LX_RESUME_STEP(adev, "clients");
 
 	if (notify_clients)
 		drm_client_dev_resume(adev_to_drm(adev), false);

@@ -393,7 +393,69 @@ lx_glue_shutdown(void)
 static int haiku_s2idle;
 module_param(haiku_s2idle, int, 0644);
 
+/* The GPU in D3hot for the sleep, as Linux' PCI core leaves it after the
+ * driver's suspend (and as the platform's S0i3 constraints ask). The
+ * function has no No_Soft_Reset, so its configuration space is saved and
+ * written back. */
+static int haiku_s2idle_d3 = 1;
+module_param(haiku_s2idle_d3, int, 0644);
+
 static bool suspended[MAX_GPUS];
+static bool in_d3[MAX_GPUS];
+static u32 saved_config[MAX_GPUS][64];
+
+static void
+gpu_to_d3(int i)
+{
+	struct pci_dev *pdev = probed[i];
+	u8 pm = pci_find_capability(pdev, PCI_CAP_ID_PM);
+	u16 control;
+	int j;
+
+	if (!haiku_s2idle_d3 || pm == 0)
+		return;
+	for (j = 0; j < 64; j++)
+		pci_read_config_dword(pdev, j * 4, &saved_config[i][j]);
+	pci_read_config_word(pdev, pm + PCI_PM_CTRL, &control);
+	pci_write_config_word(pdev, pm + PCI_PM_CTRL,
+		(control & ~PCI_PM_CTRL_STATE_MASK) | PCI_D3hot);
+	msleep(10);
+	in_d3[i] = true;
+	pci_read_config_word(pdev, pm + PCI_PM_CTRL, &control);
+	pr_info("amdgpu: %s in D3hot (pmcsr %#x)\n", pci_name(pdev), control);
+}
+
+static void
+gpu_to_d0(int i)
+{
+	struct pci_dev *pdev = probed[i];
+	u8 pm = pci_find_capability(pdev, PCI_CAP_ID_PM);
+	u16 control;
+	u32 value;
+	int j;
+
+	if (!in_d3[i])
+		return;
+	in_d3[i] = false;
+	pci_read_config_word(pdev, pm + PCI_PM_CTRL, &control);
+	pci_write_config_word(pdev, pm + PCI_PM_CTRL,
+		control & ~PCI_PM_CTRL_STATE_MASK);
+	msleep(10);
+
+	/* back to front, as Linux' pci_restore_config_space(): the BARs before
+	 * the command register; the PM control register stays as it is now */
+	for (j = 63; j >= 1; j--) {
+		if (j * 4 == ((pm + PCI_PM_CTRL) & ~3))
+			continue;
+		pci_read_config_dword(pdev, j * 4, &value);
+		if (value != saved_config[i][j])
+			pci_write_config_dword(pdev, j * 4, saved_config[i][j]);
+	}
+	pci_read_config_word(pdev, pm + PCI_PM_CTRL, &control);
+	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &value);
+	pr_info("amdgpu: %s in D0 (pmcsr %#x, bar0 %#x)\n", pci_name(pdev),
+		control, value);
+}
 
 int
 lx_glue_suspend(void)
@@ -431,6 +493,7 @@ lx_glue_suspend(void)
 			return r;
 		}
 		suspended[i] = true;
+		gpu_to_d3(i);
 		count++;
 	}
 	return count;
@@ -450,6 +513,7 @@ lx_glue_resume(void)
 			continue;
 		suspended[i] = false;
 		adev = drm_to_adev(dev);
+		gpu_to_d0(i);
 
 		pr_info("amdgpu: resuming %s\n", pci_name(probed[i]));
 		r = amdgpu_device_resume(dev, true);

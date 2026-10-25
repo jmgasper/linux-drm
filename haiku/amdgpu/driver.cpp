@@ -841,6 +841,9 @@ static bool sGPUsSleeping;
 
 /*!	Suspend to idle (state 0, ACPI_POWER_STATE_ON) puts the APUs' GPUs to
 	sleep, as Linux does for S0ix; see lx_glue_suspend(). */
+extern "C" void lx_haiku_suspend_trace(bool enabled);
+
+
 static status_t
 power_hook(void* cookie, bool resume, int32 state)
 {
@@ -859,7 +862,9 @@ power_hook(void* cookie, bool resume, int32 state)
 	}
 
 	if (sGPUsSleeping) {
+		lx_haiku_suspend_trace(true);
 		lx_glue_resume();
+		lx_haiku_suspend_trace(false);
 		sGPUsSleeping = false;
 		open_door();
 	}
