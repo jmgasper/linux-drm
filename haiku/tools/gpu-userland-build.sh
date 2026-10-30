@@ -116,8 +116,9 @@ stage_mesa() {
 	fi
 }
 
-# libavcodec with VA-API, static, for the amdgpu_va media add-on (H.264 and
-# HEVC decoders only): from src/ffmpeg (the air/OS fork) into $ROOT/ffmpeg-va
+# libavcodec with VA-API, static, for the amdgpu_va media add-on (H.264,
+# HEVC, VP9 and AV1 decoders only): from src/ffmpeg (the air/OS fork) into
+# $ROOT/ffmpeg-va
 stage_ffmpeg() {
 	rm -rf "$BUILD/ffmpeg-va"
 	mkdir -p "$BUILD/ffmpeg-va"
@@ -126,8 +127,9 @@ stage_ffmpeg() {
 		--enable-pic --disable-programs --disable-doc --disable-avdevice \
 		--disable-avformat --disable-avfilter --disable-swresample \
 		--disable-swscale --disable-network --disable-autodetect \
-		--disable-everything --enable-decoder=h264,hevc \
-		--enable-parser=h264,hevc --enable-hwaccel=h264_vaapi,hevc_vaapi \
+		--disable-everything --enable-decoder=h264,hevc,vp9,av1 \
+		--enable-parser=h264,hevc,vp9,av1 \
+		--enable-hwaccel=h264_vaapi,hevc_vaapi,vp9_vaapi,av1_vaapi \
 		--enable-vaapi \
 		&& make -j"$JOBS" && make install)
 }
