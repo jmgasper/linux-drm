@@ -383,14 +383,14 @@ lx_glue_shutdown(void)
 
 
 
-/* Suspend to idle ("haiku_s2idle 1", not yet by default): what Linux does
+/* Suspend to idle (deep sleeps only; "haiku_s2idle 0" turns it off): what Linux does
  * for an APU when the system suspends to idle (amdgpu_pmops_prepare and
  * _suspend with in_s0ix): the display state is saved and the display turned
  * off, the buffers in VRAM go to system memory, GFX, SDMA and the PSP stay
  * where they are (in GFXOFF), the SMU keeps running. The SoC cannot reach
  * its deepest state (S0i3) with the GPU awake. Discrete GPUs are left alone
  * (they would need power removed). */
-static int haiku_s2idle;
+static int haiku_s2idle = 1;
 module_param(haiku_s2idle, int, 0644);
 
 /* The GPU in D3hot for the sleep, as Linux' PCI core leaves it after the
