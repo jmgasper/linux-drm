@@ -60,6 +60,24 @@ extern "C" {
 __asm__(".type register_shutdown_hook, @function\n"
 	".type unregister_shutdown_hook, @function");
 
+// The device manager's power hooks (kdevice_manager.h), likewise: the
+// kernel calls them when the system suspends and resumes.
+extern "C" {
+	typedef status_t (*device_manager_power_hook)(void* cookie, bool resume,
+		int32 state);
+	status_t device_manager_add_power_hook(device_manager_power_hook hook,
+		void* cookie, const char* name) __attribute__((weak));
+	status_t device_manager_add_power_hook_etc(device_manager_power_hook hook,
+		void* cookie, const char* name, uint32 flags) __attribute__((weak));
+	status_t device_manager_remove_power_hook(device_manager_power_hook hook,
+		void* cookie) __attribute__((weak));
+}
+__asm__(".type device_manager_add_power_hook, @function\n"
+	".type device_manager_add_power_hook_etc, @function\n"
+	".type device_manager_remove_power_hook, @function");
+// DEVICE_MANAGER_POWER_HOOK_DEEP_SLEEP: the GPU only sleeps in a deep sleep
+static const uint32 kPowerHookDeepSleep = 0x01;
+
 
 #define DRIVER_NAME "amdgpu_drm"
 #define TRACE(x...) dprintf(DRIVER_NAME ": " x)
@@ -757,6 +775,103 @@ device_free(void* _cookie)
 }
 
 
+// While the GPUs sleep (suspend to idle), DRM calls wait at the door; the
+// ones under way get a while to finish before the GPUs go to sleep. (Linux
+// freezes every task first; Haiku's keep running.)
+static mutex sSleepLock = MUTEX_INITIALIZER("amdgpu_drm sleep");
+static ConditionVariable sSleepCondition;
+static bool sSleeping;
+static int32 sCallsUnderway;
+
+
+static void
+enter_call()
+{
+	MutexLocker locker(sSleepLock);
+	while (sSleeping) {
+		ConditionVariableEntry entry;
+		sSleepCondition.Add(&entry);
+		locker.Unlock();
+		entry.Wait();
+		locker.Lock();
+	}
+	sCallsUnderway++;
+}
+
+
+static void
+leave_call()
+{
+	MutexLocker locker(sSleepLock);
+	if (--sCallsUnderway == 0 && sSleeping)
+		sSleepCondition.NotifyAll();
+}
+
+
+static void
+close_door()
+{
+	MutexLocker locker(sSleepLock);
+	sSleeping = true;
+
+	bigtime_t end = system_time() + 2000000;
+	while (sCallsUnderway > 0 && system_time() < end) {
+		ConditionVariableEntry entry;
+		sSleepCondition.Add(&entry);
+		locker.Unlock();
+		entry.Wait(B_ABSOLUTE_TIMEOUT, end);
+		locker.Lock();
+	}
+	if (sCallsUnderway > 0)
+		TRACE("sleeping with %" B_PRId32 " calls under way\n", sCallsUnderway);
+}
+
+
+static void
+open_door()
+{
+	MutexLocker locker(sSleepLock);
+	sSleeping = false;
+	sSleepCondition.NotifyAll();
+}
+
+
+static bool sGPUsSleeping;
+
+
+/*!	Suspend to idle (state 0, ACPI_POWER_STATE_ON) puts the APUs' GPUs to
+	sleep, as Linux does for S0ix; see lx_glue_suspend(). */
+extern "C" void lx_haiku_suspend_trace(bool enabled);
+
+
+static status_t
+power_hook(void* cookie, bool resume, int32 state)
+{
+	if (!resume) {
+		if (state != 0)
+			return B_OK;
+
+		close_door();
+		int result = lx_glue_suspend();
+		if (result <= 0) {
+			open_door();
+			return haiku_status(result);
+		}
+		sGPUsSleeping = true;
+		return B_OK;
+	}
+
+	if (sGPUsSleeping) {
+		lx_haiku_suspend_trace(true);
+		lx_glue_resume();
+		lx_haiku_suspend_trace(false);
+		sGPUsSleeping = false;
+		open_door();
+	}
+	return B_OK;
+}
+
+
 static status_t
 device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 {
@@ -933,8 +1048,12 @@ device_control(void* _cookie, uint32 op, void* buffer, size_t length)
 	}
 
 	// everything of type 'd' is a DRM ioctl
-	if (((op >> 8) & 0xff) == 'd')
-		return haiku_status(lx_glue_ioctl(cookie->file, op, buffer));
+	if (((op >> 8) & 0xff) == 'd') {
+		enter_call();
+		long result = lx_glue_ioctl(cookie->file, op, buffer);
+		leave_call();
+		return haiku_status(result);
+	}
 
 	return B_DEV_INVALID_IOCTL;
 }
@@ -1328,6 +1447,7 @@ init_hardware(void)
 
 
 static bool sShutdownHookRegistered;
+static bool sPowerHookRegistered;
 
 
 /*	The GPUs are brought to rest before the machine is powered off or
@@ -1476,6 +1596,14 @@ init_driver(void)
 		&& register_shutdown_hook(&shutdown_gpus, NULL) == B_OK) {
 		sShutdownHookRegistered = true;
 	}
+	sSleepCondition.Init(&sSleepCondition, "amdgpu_drm sleep");
+	if (device_manager_add_power_hook_etc != NULL) {
+		sPowerHookRegistered = device_manager_add_power_hook_etc(&power_hook,
+			NULL, DRIVER_NAME, kPowerHookDeepSleep) == B_OK;
+	} else if (device_manager_add_power_hook != NULL) {
+		sPowerHookRegistered = device_manager_add_power_hook(&power_hook,
+			NULL, DRIVER_NAME) == B_OK;
+	}
 	// after publish_devices(), which follows init_driver()
 	thread_id pin = spawn_kernel_thread(pin_thread, "amdgpu_drm pin",
 		B_NORMAL_PRIORITY, NULL);
@@ -1561,6 +1689,10 @@ uninit_driver(void)
 	if (sShutdownHookRegistered) {
 		unregister_shutdown_hook(&shutdown_gpus, NULL);
 		sShutdownHookRegistered = false;
+	}
+	if (sPowerHookRegistered) {
+		device_manager_remove_power_hook(&power_hook, NULL);
+		sPowerHookRegistered = false;
 	}
 	// unpinned already (devfs unloads no driver with an open device), or
 	// never pinned (a start that failed)
